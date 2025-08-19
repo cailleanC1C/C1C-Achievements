@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: c1c-appreciationbot
+    env: python
+    plan: free
+    buildCommand: ""
+    startCommand: python level_whisper_bot.py
