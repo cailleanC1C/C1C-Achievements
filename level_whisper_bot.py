@@ -1,116 +1,183 @@
-from flask import Flask
-from threading import Thread
-import discord
-from discord.ext import commands
-
-# Web server setup to keep the bot alive
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "I'm alive!"
-
-def run():
-    app.run(host='0.0.0.0', port=8080)
-
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
-
-# Bot setup
-intents = discord.Intents.default()
-intents.message_content = True
-intents.guilds = True
-intents.members = True
-
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-# Level-up triggers
-triggers = {
-    "has reached Level 20!":
-    """ ## 🔹 **The first sparks always seem small. Until you realize they never went out.**
-
-**{user}** has reached **Level 20** and stepped into the role of **🔥 Keeper of the Conversation Flame**. You’ve brought warmth, noise and the kind of flickers we gather around. Keep it lit.""",
-
-    "has reached Level 30!":
-    """ ## 🔹 **The words know who carries them.**
-
-{user}, you’ve reached **Level 30** and now wear the title **📝 Warden of the Words**. You show up, you speak up, and somehow… you make it all feel a little more like home.""",
-
-    "has reached Level 40!":
-    """ ## 🔹 **There’s laughter in the halls, and somewhere behind it, a steady presence.**
-
-{user} has reached **Level 40** and been named **🎭 Guardian of the Banter Hall**. You don’t just toss words into the fire, you hold the space when it gets too hot.""",
-
-    "has reached Level 50!":
-    """ ## 🔹 **Not all chaos is loud. Some of it is carefully catalogued.**
-
-{user} hit  **Level 50** and with it, the mantle of **🧷 High Curator of Chat Chaos**. You leave a trail of inside jokes and suspicious emoji reactions. We wouldn’t have it any other way.""",
-
-    "has reached Level 60!":
-    """ ## 🔹 **Some voices echo. Others endure.**
-
-{user} has reached  **Level 60** and taken their place as **🕯️ Steward of the Spoken Flame**. You’ve helped keep this place warm, even when it got quiet. That’s what makes it real.""",
-
-    "has reached Level 70!":
-    """ ## 🔹 **It’s not always what you say. Sometimes it’s just that you show up.**
-
-{user} now walks at  **Level 70** as the **📣 Patron of the Public Word**. You’ve shared, sparked, replied, stayed. And it matters more than you know.""",
-
-    "has reached Level 80!":
-    """ ## 🔹 **You’ve seen things. Typed things. Possibly instigated things.**
-
-{user} is now  **Level 80** and whispered into the role of **🪶 Custodian of the Cult Chatter**. You don’t just ride the chaos, you store it neatly in scrolls somewhere we’re afraid to open.""",
-
-    "has reached Level 90!":
-    """ ## 🔹 **There are legends buried in these channels, and you’ve probably caused half of them.**
-
-{user} has reached **Level 90** and now scribes as **📚 Archivist of the Banter Scrolls**. May your scrolls remain unreadable and your typos forever canon.""",
-
-    "has reached Level 100!":
-    """ ## 🔹 **There’s always that one voice you hear before the storm hits.**
-
-{user} now wears the title **🗣️ Mouthpiece of the Madness** at Level 100. We’d say you’ve earned it… but let’s be honest, it was inevitable.""",
-
-    "has reached Level 110!":
-    """ ## 🔹 **The dots appear. And we all know what’s coming.**
-
-{user} has reached **Level 110** and taken their place as **💬 Harbinger of the Typing Dots**. Your messages may delay, but your presence is never in doubt.""",
+# ------------------------------------------------------------
+# CONFIG (clusters)
+# ------------------------------------------------------------
+CLUSTERS = {
+    "hydra": {
+        "roles": {"Hydra Normal", "Hydra Hard", "Hydra Brutal", "Hydra NM"}
+    },
+    "chimera": {
+        "roles": {"Chimera Normal", "Chimera Hard", "Chimera NM", "Chimera UNM"}
+    },
+    "doomtower": {
+        "roles": {"Doomtower Normal", "Doomtower Hard"}
+    },
+    "cursed_city": {
+        "roles": {"101 Stages cleared Sintranos Normal", "101 Stages cleared Sintranos Hard"}
+    },
+    "amius": {
+        "roles": {"Amius Normal", "Amius Hard"}
+    },
+    "cb_keys": {
+        "roles": {"1 Key NM", "1 Key UNM", "2 Key UNM"}
+    },
+    "arena": {
+        "roles": {"Platinum Arena"}
+    },
+    "faction_wars": {
+        "roles": {"Faction Wars"}
+    },
 }
 
-@bot.event
-async def on_ready():
-    print(f'Logged in as {bot.user.name}')
-    await bot.change_presence(activity=discord.Activity(
-        type=discord.ActivityType.watching,
-        name="Helping Caillean run the chaos • No refunds"
-    ))
-    for guild in bot.guilds:
-        try:
-            await guild.me.edit(nick="The Scribe That Knows Too Much")
-            print(f"Nickname set in {guild.name}")
-        except discord.Forbidden:
-            print(f"Missing permission to change nickname in {guild.name}")
-        except Exception as e:
-            print(f"Failed to set nickname in {guild.name}: {e}")
+# Special champions fire immediately (never grouped)
+SPECIAL_CHAMPIONS = {
+    "The Angel": "Arbiter’s questline finally closed — campaign clears, dungeons farmed, and every stubborn step ticked off. That road is long and brutal, and finishing it deserves nothing less than a proper toast. 🥂✨",
+    "The Dragonborn": "Ramantu’s questline is no small grind — endless missions, high hurdles, and all the patience in the world. That’s endgame grit shining through, and a milestone worth loud applause. 🐉🔥",
+    "The Stampede": "The Marius questline beaten back step after step — waves endured, bosses toppled, stubborn retries piling high. Now Marius charges in, and that’s a flex the clan won’t forget. 🐂💥",
+    "The Medusa": "Hydra fragments hoarded chest by chest until Mithralla finally took shape. That’s weeks of patience, grind, and poison well spent. A champion forged in venom and victory. 🐍✨",
+    "The Zealot": "Chimera fragments gathered one by one — every fight, every chest, until Embrys stepped out of the mirror. That’s persistence crowned in style. 🔥🪞",
+    "The Succubus": "Siege after siege, reward chests farmed, fragments stacked steady. Lamasu doesn’t come easy — this is grind and glory rolled into one. 🛡️❤️",
+    "The Gladiator": "Live Arena is no joke — fight after fight, tooth and nail, until Quintus was earned. That’s raw PvP grit on display, and the crown sits well. 🗡️🏛️",
+    "The Devil": "500 cursed candles burned in the City, stage after stage, grind after grind — until Karnage rose from the shadows. That’s dedication with a streak of chaos, and we love it. 🔥💀",
+    "The Arachne": "Mikage doesn’t come easy — shard RNG, elusive epics, endless leveling, and the full fusion grind on top. Most players never even see her in their roster, but today Mikage’s here. That’s sheer determination paid in full. 🕷️🔥",
+}
 
-@bot.event
-async def on_message(message):
-    if message.author.bot:
-        return
-    if message.channel.id != 1050097435789250570:
-        return
-    for trigger, response in triggers.items():
-        if trigger in message.content:
-            mentioned_user = message.mentions[0].mention if message.mentions else message.author.mention
-            formatted = response.format(user=mentioned_user)
-            await message.channel.send(formatted)
-            break
-    await bot.process_commands(message)
+# ------------------------------------------------------------
+# Two-line Caillean toasts (exactly your text)
+# ------------------------------------------------------------
 
-# Keep alive
-keep_alive()
-# Run the bot
-import os
-bot.run(os.getenv("DISCORD_BOT_TOKEN"))
+def msg_hydra_single(user, role):
+    return (
+        f"> {user} just wrapped up **{role}**.\n"
+        "That’s one of those clears — keys dropped, heads rolling, poisons ticking, and sheer stubborn willpower pushing it through. "
+        "Hydra’s sulking in the corner, but the chest is cracked and the clan’s raising a glass. 🐍🍻"
+    )
 
+def msg_hydra_group(user, roles_list):
+    roles_str = ", ".join(f"**{r}**" for r in roles_list)
+    return (
+        f"> {user} didn’t just poke the beast… they cleared {roles_str} like it was a warm-up act.\n"
+        "Keys burned, heads toppled one after another, loot stacked with every chest — and not a pause in sight. "
+        "That’s the kind of progress that makes the rest of us quietly re-check if we even used our keys this week. 👏🔥"
+    )
+
+def msg_chimera_single(user, role):
+    return (
+        f"> {user} just finished **{role}**.\n"
+        "That’s no easy feat — reflections twisting, phases dragging on, and more than a few “do we really have to?” key drops. "
+        "But Chimera blinked first, and the loot is proof. 🪞✨"
+    )
+
+def msg_chimera_group(user, roles_list):
+    roles_str = ", ".join(f"**{r}**" for r in roles_list)
+    return (
+        f"> {user} didn’t just step into the mirror hall… they cleared {roles_str} back-to-back.\n"
+        "Illusions stacked against them, phases stretched long, every mechanic screaming for patience — yet they walked it like choreography. "
+        "Smooth, stubborn, flawless. 👏💎"
+    )
+
+def msg_doom_single(user, role):
+    return (
+        f"> {user} just topped **{role}**.\n"
+        "Floor after floor, waves dragging on, bosses stacking mechanics like bad jokes — but none of it held them back. "
+        "The climb’s done, the key’s turned, and the tower’s been put back in its place. 🗼🥂"
+    )
+
+def msg_doom_group(user, roles_list):
+    roles_str = ", ".join(f"**{r}**" for r in roles_list)
+    return (
+        f"> {user} didn’t just poke around — they cleared {roles_str} in one sweep.\n"
+        "Rotations reset, bosses lined up, every floor conquered without flinching. "
+        "That’s not just a climb, that’s planting a flag on top and waving down at the rest of us. 🏆🔥"
+    )
+
+def msg_city_single(user, role):
+    return (
+        f"> {user} just wrapped up **{role}**.\n"
+        "Every path walked, every stage dragged through, every stubborn fight finally settled. "
+        "Sintranos doesn’t give up its crown easy — but today it bowed, and the loot’s proof of it. 👑✨"
+    )
+
+def msg_city_group(user, roles_list):
+    roles_str = ", ".join(f"**{r}**" for r in roles_list)
+    return (
+        f"> {user} didn’t just wander the streets — they swept up {roles_str} in one run.\n"
+        "Routes traced, side paths beaten, the full city scrubbed clean from start to finish. "
+        "That’s not just a clear, that’s owning the map outright. 🏰🔥"
+    )
+
+def msg_amius_single(user, role):
+    return (
+        f"> {user} just wrapped up **{role}**.\n"
+        "That’s the end boss of Sintranos brought down — waves endured, mechanics dragged out, and sheer stubbornness carrying it through. "
+        "Amius doesn’t fall easy, but today it’s their banner standing tall. 👑⚔️"
+    )
+
+def msg_amius_group(user, roles_list):
+    roles_str = ", ".join(f"**{r}**" for r in roles_list)
+    return (
+        f"> {user} didn’t just poke the Cursed City — they cleared {roles_str} straight through.\n"
+        "Both ends of Amius crushed, the hardest fights in Sintranos checked off the list. "
+        "That’s not just progression, that’s mastery stamped on the map. 🏰🔥"
+    )
+
+# --- Clan Boss Keys (keep ONLY the second set you chose) ---
+def msg_cb_single(user, role):
+    return (
+        f"> {user} just earned **{role}**.\n"
+        "Max chest cracked with ruthless efficiency — the boss barely had time to snarl before the damage stacked too high. "
+        "That’s account power showing off. 🔑📊"
+    )
+
+def msg_cb_group(user, roles_list):
+    roles_str = ", ".join(f"**{r}**" for r in roles_list)
+    return (
+        f"> {user} stacked {roles_str}.\n"
+        "Different levels, same story — max chests opened in style, bosses folded like paper. "
+        "That’s damage math and team building coming together beautifully. 🥁💥"
+    )
+
+def msg_arena_single(user, role):
+    return (
+        f"> {user} just climbed into **{role}**.\n"
+        "That’s the big leagues — speed checks, nukes flying, constant scrapping at the top. "
+        "Platinum’s not a tourist stop, and they just planted their flag on the skyline. ⚔️🌆"
+    )
+
+def msg_faction_single(user, role):
+    return (
+        f"> {user} just wrapped up **Faction Wars** and welcomed Lydia home.\n"
+        "That’s months of grind, team building across every faction, and more retries than anyone dares to count. "
+        "Finishing it is one of the biggest steps in Raid — and today it’s done. Huge respect. 💜⚔️"
+    )
+
+def msg_cross_fallback(user, roles_list):
+    roles_str = ", ".join(f"**{r}**" for r in roles_list)
+    return (
+        f"> {user} just went on a spree and picked up {roles_str}.\n"
+        "That’s milestones dropping left and right — bosses toppled, fragments stacked, loot pouring in, and progress lighting up across the board. "
+        "Feels less like a checklist and more like a raid festival, and we’re all clapping from the tavern seats. 🍿🔥"
+    )
+
+def msg_special(user, role_name, note):
+    return (
+        f"> {user} just unlocked **{role_name}**.\n"
+        f"{note}"
+    )
+
+# Cluster → (single_fn, group_fn)
+CLUSTER_TEMPLATES = {
+    "hydra":        (msg_hydra_single,   msg_hydra_group),
+    "chimera":      (msg_chimera_single, msg_chimera_group),
+    "doomtower":    (msg_doom_single,    msg_doom_group),
+    "cursed_city":  (msg_city_single,    msg_city_group),
+    "amius":        (msg_amius_single,   msg_amius_group),
+    "cb_keys":      (msg_cb_single,      msg_cb_group),
+    "arena":        (msg_arena_single,   None),  # single only
+    "faction_wars": (msg_faction_single, None),  # single only
+}
+
+# Build role → cluster map (include Amius)
+ROLE_TO_CLUSTER = {}
+for cluster, data in CLUSTERS.items():
+    for r in data["roles"]:
+        ROLE_TO_CLUSTER[r.lower()] = cluster
