@@ -8,13 +8,13 @@ import discord
 from discord.ext import commands
 
 # --------------------------
-# Logging (so Render logs show issues)
+# Logging (so Render shows errors)
 # --------------------------
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("c1c-appreciation-bot")
 
 # --------------------------
-# Keep-alive tiny web server (use Render's $PORT)
+# Keep-alive tiny web server (Render uses $PORT)
 # --------------------------
 app = Flask(__name__)
 
@@ -28,8 +28,7 @@ def _run_flask():
     app.run(host="0.0.0.0", port=port)
 
 def keep_alive():
-    t = Thread(target=_run_flask, daemon=True)
-    t.start()
+    Thread(target=_run_flask, daemon=True).start()
 
 # -------------
 # Discord setup
@@ -44,57 +43,40 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # ------------------------------------------------------------
 # CONFIG (channels + grouping)
 # ------------------------------------------------------------
-AUDIT_LOG_CHANNEL_NAME = "audit-log"   # source channel for role logs
-LEVELS_CHANNEL_NAME    = "levels"      # target channel for appreciation messages
-GROUP_WINDOW_SECONDS   = 60            # group multiple role adds within 60s per user
+AUDIT_LOG_CHANNEL_NAME = "audit-log"   # source of role logs
+LEVELS_CHANNEL_NAME    = "levels"      # target for appreciation
+GROUP_WINDOW_SECONDS   = 60            # group for 60s
 
 # ------------------------------------------------------------
 # CONFIG (clusters)
 # ------------------------------------------------------------
 CLUSTERS = {
-    "hydra": {
-        "roles": {"Hydra Normal", "Hydra Hard", "Hydra Brutal", "Hydra NM"}
-    },
-    "chimera": {
-        "roles": {"Chimera Normal", "Chimera Hard", "Chimera NM", "Chimera UNM"}
-    },
-    "doomtower": {
-        "roles": {"Doomtower Normal", "Doomtower Hard"}
-    },
-    "cursed_city": {
-        "roles": {"101 Stages cleared Sintranos Normal", "101 Stages cleared Sintranos Hard"}
-    },
-    "amius": {
-        "roles": {"Amius Normal", "Amius Hard"}
-    },
-    "cb_keys": {
-        "roles": {"1 Key NM", "1 Key UNM", "2 Key UNM"}
-    },
-    "arena": {
-        "roles": {"Platinum Arena"}
-    },
-    "faction_wars": {
-        "roles": {"Faction Wars"}
-    },
+    "hydra": {"roles": {"Hydra Normal", "Hydra Hard", "Hydra Brutal", "Hydra NM"}},
+    "chimera": {"roles": {"Chimera Normal", "Chimera Hard", "Chimera NM", "Chimera UNM"}},
+    "doomtower": {"roles": {"Doomtower Normal", "Doomtower Hard"}},
+    "cursed_city": {"roles": {"101 Stages cleared Sintranos Normal", "101 Stages cleared Sintranos Hard"}},
+    "amius": {"roles": {"Amius Normal", "Amius Hard"}},
+    "cb_keys": {"roles": {"1 Key NM", "1 Key UNM", "2 Key UNM"}},
+    "arena": {"roles": {"Platinum Arena"}},
+    "faction_wars": {"roles": {"Faction Wars"}},
 }
 
 # Special champions fire immediately (never grouped)
 SPECIAL_CHAMPIONS = {
-    "The Angel": "Arbiter’s questline finally closed — campaign clears, dungeons farmed, and every stubborn step ticked off. That road is long and brutal, and finishing it deserves nothing less than a proper toast. 🥂✨",
-    "The Dragonborn": "Ramantu’s questline is no small grind — endless missions, high hurdles, and all the patience in the world. That’s endgame grit shining through, and a milestone worth loud applause. 🐉🔥",
-    "The Stampede": "The Marius questline beaten back step after step — waves endured, bosses toppled, stubborn retries piling high. Now Marius charges in, and that’s a flex the clan won’t forget. 🐂💥",
-    "The Medusa": "Hydra fragments hoarded chest by chest until Mithralla finally took shape. That’s weeks of patience, grind, and poison well spent. A champion forged in venom and victory. 🐍✨",
-    "The Zealot": "Chimera fragments gathered one by one — every fight, every chest, until Embrys stepped out of the mirror. That’s persistence crowned in style. 🔥🪞",
-    "The Succubus": "Siege after siege, reward chests farmed, fragments stacked steady. Lamasu doesn’t come easy — this is grind and glory rolled into one. 🛡️❤️",
-    "The Gladiator": "Live Arena is no joke — fight after fight, tooth and nail, until Quintus was earned. That’s raw PvP grit on display, and the crown sits well. 🗡️🏛️",
-    "The Devil": "500 cursed candles burned in the City, stage after stage, grind after grind — until Karnage rose from the shadows. That’s dedication with a streak of chaos, and we love it. 🔥💀",
-    "The Arachne": "Mikage doesn’t come easy — shard RNG, elusive epics, endless leveling, and the full fusion grind on top. Most players never even see her in their roster, but today Mikage’s here. That’s sheer determination paid in full. 🕷️🔥",
+    "The Angel": """Arbiter’s questline finally closed — campaign clears, dungeons farmed, and every stubborn step ticked off. That road is long and brutal, and finishing it deserves nothing less than a proper toast. 🥂✨""",
+    "The Dragonborn": """Ramantu’s questline is no small grind — endless missions, high hurdles, and all the patience in the world. That’s endgame grit shining through, and a milestone worth loud applause. 🐉🔥""",
+    "The Stampede": """The Marius questline beaten back step after step — waves endured, bosses toppled, stubborn retries piling high. Now Marius charges in, and that’s a flex the clan won’t forget. 🐂💥""",
+    "The Medusa": """Hydra fragments hoarded chest by chest until Mithralla finally took shape. That’s weeks of patience, grind, and poison well spent. A champion forged in venom and victory. 🐍✨""",
+    "The Zealot": """Chimera fragments gathered one by one — every fight, every chest, until Embrys stepped out of the mirror. That’s persistence crowned in style. 🔥🪞""",
+    "The Succubus": """Siege after siege, reward chests farmed, fragments stacked steady. Lamasu doesn’t come easy — this is grind and glory rolled into one. 🛡️❤️""",
+    "The Gladiator": """Live Arena is no joke — fight after fight, tooth and nail, until Quintus was earned. That’s raw PvP grit on display, and the crown sits well. 🗡️🏛️""",
+    "The Devil": """500 cursed candles burned in the City, stage after stage, grind after grind — until Karnage rose from the shadows. That’s dedication with a streak of chaos, and we love it. 🔥💀""",
+    "The Arachne": """Mikage doesn’t come easy — shard RNG, elusive epics, endless leveling, and the full fusion grind on top. Most players never even see her in their roster, but today Mikage’s here. That’s sheer determination paid in full. 🕷️🔥""",
 }
 
 # ------------------------------------------------------------
 # Two-line Caillean toasts (exactly your text)
 # ------------------------------------------------------------
-
 def msg_hydra_single(user, role):
     return (
         f"> {user} just wrapped up **{role}**.\n"
@@ -170,7 +152,7 @@ def msg_amius_group(user, roles_list):
         "That’s not just progression, that’s mastery stamped on the map. 🏰🔥"
     )
 
-# --- Clan Boss Keys (keep ONLY the second set) ---
+# --- Clan Boss Keys (only the second set) ---
 def msg_cb_single(user, role):
     return (
         f"> {user} just earned **{role}**.\n"
@@ -209,7 +191,6 @@ def msg_cross_fallback(user, roles_list):
     )
 
 def msg_special(user, role_name, note):
-    # Specials use two lines: opener + crafted note from dict
     return (
         f"> {user} just unlocked **{role_name}**.\n"
         f"{note}"
@@ -234,7 +215,7 @@ for cluster, data in CLUSTERS.items():
         ROLE_TO_CLUSTER[r.lower()] = cluster
 
 # ------------------------------------------------------------
-# Your existing level-up texts (kept as-is)
+# Level-up messages (kept as-is)
 # ------------------------------------------------------------
 triggers = {
     "has reached Level 20!":
@@ -289,14 +270,27 @@ triggers = {
 }
 
 # ------------------------------------------------------------
-# Runtime caches per guild for grouping (non-special only)
+# Runtime caches (grouping for non-specials)
 # ------------------------------------------------------------
 buffers = {}        # buffers[guild_id][user_id] = {"roles": set([...]), "task": asyncio.Task}
 guild_channels = {} # guild_id -> {"audit": channel, "levels": channel}
 
 # ------------------------------------------------------------
-# Helpers
+# Helpers (embed parsing + role detection)
 # ------------------------------------------------------------
+def _embed_text(msg: discord.Message) -> str:
+    """Concatenate all embed text so we can regex it like content."""
+    parts = []
+    for e in msg.embeds:
+        if e.title: parts.append(e.title)
+        if e.description: parts.append(e.description)
+        for f in (e.fields or []):
+            if f.name: parts.append(f.name)
+            if f.value: parts.append(f.value)
+        if e.footer and getattr(e.footer, "text", None):
+            parts.append(e.footer.text)
+    return "\n".join(parts)
+
 def find_cluster(role_name: str):
     return ROLE_TO_CLUSTER.get(role_name.lower())
 
@@ -329,14 +323,9 @@ async def flush_user_buffer(guild: discord.Guild, user_id: int, user_mention: st
     if not entry:
         return
     roles = sorted(entry["roles"])
-    clusters_present = set()
-    for r in roles:
-        ck = find_cluster(r)
-        if ck:
-            clusters_present.add(ck)
+    clusters_present = {find_cluster(r) for r in roles if find_cluster(r)}
 
     if not clusters_present:
-        # Unknown roles → generic fallback
         msg = msg_cross_fallback(user_mention, roles)
         await send_levels(guild, msg)
         gbuf.pop(user_id, None)
@@ -356,20 +345,42 @@ async def flush_user_buffer(guild: discord.Guild, user_id: int, user_mention: st
     gbuf.pop(user_id, None)
 
 def role_names_from_message(msg: discord.Message):
+    """Extract role names from content + embeds + common patterns."""
     names = set()
+
+    # Mentions (rare for roles in logs, but include)
     for r in msg.role_mentions:
         names.add(r.name)
-    for m in re.finditer(r"\*\*([^*]+)\*\*", msg.content):
+
+    blob = f"{msg.content or ''}\n{_embed_text(msg)}".strip()
+
+    # Bolded role names **Role**
+    for m in re.finditer(r"\*\*([^*]+)\*\*", blob):
         names.add(m.group(1).strip())
-    for m in re.finditer(r"Role\s+added[: ]+(.+?)\s+(?:to|for)\s+", msg.content, flags=re.I):
+
+    # Common phrases: "Role added", "Gave role", etc.
+    for m in re.finditer(r"(?:role\s+added|gave\s+role(?:s)?|added\s+role)\s*[:\-]?\s*([^\n\r]+?)\s+(?:to|for)\s+", blob, flags=re.I):
+        candidate = m.group(1).strip()
+        for piece in re.split(r"[,/]| and ", candidate):
+            piece = piece.strip()
+            if piece:
+                names.add(piece)
+
+    # Also catch lines that look like "@Chimera Hard" in embeds
+    for m in re.finditer(r"@([A-Za-z0-9 ][A-Za-z0-9 \-_/]+)", blob):
         names.add(m.group(1).strip())
-    return names
+
+    # Clean stray IDs
+    cleaned = set()
+    for n in names:
+        cleaned.add(re.sub(r"<@&\d+>", "", n).strip())
+    return {c for c in cleaned if c}
 
 def looks_like_role_add(msg: discord.Message):
-    text = msg.content.lower()
-    if "removed" in text or "role removed" in text:
+    blob = f"{(msg.content or '').lower()}\n{_embed_text(msg).lower()}"
+    if "removed" in blob or "role removed" in blob:
         return False
-    return ("role added" in text) or (msg.role_mentions and (msg.mentions or msg.reference or " to " in text))
+    return ("role added" in blob or "gave role" in blob or "added role" in blob or msg.role_mentions)
 
 # ------------------------------------------------------------
 # Events
@@ -392,7 +403,7 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    # Existing level-up responses (kept as-is)
+    # Existing level-up responses (kept)
     for trigger, response in triggers.items():
         if trigger in message.content:
             mentioned_user = message.mentions[0].mention if message.mentions else message.author.mention
@@ -400,13 +411,13 @@ async def on_message(message: discord.Message):
             await message.channel.send(formatted)
             break
 
-    # Achievement role handling from #audit-log
+    # Audit-log role detection (now parses embeds too)
     chans = await ensure_channels_for_guild(message.guild)
     if chans["audit"] and message.channel.id == chans["audit"].id and looks_like_role_add(message):
         target_mention = message.mentions[0].mention if message.mentions else None
         target_id = message.mentions[0].id if message.mentions else None
         if not target_id:
-            m = re.search(r"\bto\s+<@!?(\d+)>", message.content)
+            m = re.search(r"\bto\s+<@!?(\d+)>", f"{message.content}\n{_embed_text(message)}")
             if m:
                 target_id = int(m.group(1))
                 target_mention = f"<@{target_id}>"
@@ -421,7 +432,7 @@ async def on_message(message: discord.Message):
         for rn in role_names:
             if is_special(rn):
                 await send_levels(message.guild, msg_special(target_mention, rn, SPECIAL_CHAMPIONS[rn]))
-            else:
+            elif rn.lower() in ROLE_TO_CLUSTER:
                 to_collect.append(rn)
 
         if to_collect:
@@ -446,6 +457,57 @@ async def on_message(message: discord.Message):
 
     await bot.process_commands(message)
 
+@bot.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    """
+    Fallback: fires when roles actually change. We diff roles and run the same pipeline.
+    Catches role adds even if the audit logger format changes.
+    """
+    try:
+        before_set = {r.name for r in before.roles}
+        after_set  = {r.name for r in after.roles}
+        added = list(after_set - before_set)
+        if not added:
+            return
+
+        recognized = []
+        specials = []
+        for rn in added:
+            if rn in SPECIAL_CHAMPIONS:
+                specials.append(rn)
+            elif rn.lower() in ROLE_TO_CLUSTER:
+                recognized.append(rn)
+
+        if not recognized and not specials:
+            return
+
+        # Specials fire immediately
+        for rn in specials:
+            await send_levels(after.guild, msg_special(after.mention, rn, SPECIAL_CHAMPIONS[rn]))
+
+        # Group others
+        if recognized:
+            gbuf = buffers.setdefault(after.guild.id, {})
+            entry = gbuf.get(after.id)
+            if entry and "task" in entry and not entry["task"].done():
+                entry["roles"].update(recognized)
+                entry["task"].cancel()
+            else:
+                entry = {"roles": set()}
+                gbuf[after.id] = entry
+            entry["roles"].update(recognized)
+
+            async def _delayed_flush():
+                try:
+                    await asyncio.sleep(GROUP_WINDOW_SECONDS)
+                    await flush_user_buffer(after.guild, after.id, after.mention)
+                except asyncio.CancelledError:
+                    pass
+
+            entry["task"] = asyncio.create_task(_delayed_flush())
+    except Exception:
+        log.exception("on_member_update failed")
+
 # --------------------------
 # Start the app + discord
 # --------------------------
@@ -459,6 +521,6 @@ if __name__ == "__main__":
     log.info("starting discord client…")
     try:
         bot.run(token)
-    except Exception as e:
-        log.exception("fatal error on startup: %s", e)
+    except Exception:
+        log.exception("fatal error on startup")
         raise
