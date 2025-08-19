@@ -111,5 +111,6 @@ async def on_message(message):
 # Keep alive
 keep_alive()
 # Run the bot
-bot.run(
-    "MTQwNjcwNzk1OTgxOTY2NTQwOA.GqfDL5.CsVaLx4VGHA-siJTcOeLXdJnR69Fq3SBQ18U7U")
+import os
+bot.run(os.getenv("DISCORD_BOT_TOKEN"))
+
