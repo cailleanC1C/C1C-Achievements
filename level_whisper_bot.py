@@ -508,6 +508,10 @@ async def on_member_update(before: discord.Member, after: discord.Member):
     except Exception:
         log.exception("on_member_update failed")
 
+@bot.command(name="ping")
+async def ping(ctx):
+    await ctx.send("✅ I’m alive and listening, captain!")
+
 # --------------------------
 # Start the app + discord
 # --------------------------
