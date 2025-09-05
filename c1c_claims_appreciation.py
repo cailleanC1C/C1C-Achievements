@@ -1,37 +1,5 @@
-# C1C Appreciation + Claims Bot — Web Service (Flask keep-alive) + boot diagnostics
-# ---------------------------------------------------------------------------------
-# Config sources (choose ONE):
-#   • Google Sheets (live):   CONFIG_SHEET_ID + SERVICE_ACCOUNT_JSON
-#   • Local Excel fallback:   LOCAL_CONFIG_XLSX = /opt/render/project/src/C1C_Claims_Config_reminderStyle.xlsx
-#
-# Env:
-#   DISCORD_BOT_TOKEN=...
-#   CONFIG_SHEET_ID=...                # optional
-#   SERVICE_ACCOUNT_JSON=...           # optional (inline JSON or path to JSON)
-#   LOCAL_CONFIG_XLSX=/opt/render/project/src/C1C_Claims_Config_reminderStyle.xlsx   # optional
-#   CONFIG_AUTO_REFRESH_MINUTES=0      # optional (0 disables; e.g., 15 to auto-refresh every 15 min)
-#
-# Deps (requirements.txt):
-#   discord.py==2.3.2
-#   Flask==3.0.3
-#   pandas==2.2.2
-#   openpyxl==3.1.5
-#   gspread==6.1.2
-#   google-auth==2.31.0
-#
-# Commands:
-#   !ping
-#   !testconfig         (pretty names + mentions + IDs)
-#   !configstatus       (source + last loaded)
-#   !reloadconfig       (re-fetch from sheet/xlsx)
-#   !listach [filter]   (show loaded achievement keys)
-#   !findach <text>     (search achievement rows)
-#   !testach <key> [here|#channel|channel_id]
-#   !testlevel <query> [here|#channel|channel_id]
-#
-# Flow:
-#   Proof thread → [Use first / Choose image / Use all / Cancel] → Category → Role → AUTO_GRANT or GK review
-#   Big role icon pulled from the Discord role's icon, embeds use Title/Body/Footer from sheet, tokens {user}/{role}/{emoji}
+# c1c_claims_appreciation.py
+# C1C Appreciation + Claims Bot — Web Service (Flask keep-alive) + config loader + review flow
 
 import os, re, json, asyncio, logging, datetime, threading, traceback
 from typing import Optional, List, Dict, Tuple
@@ -39,9 +7,9 @@ from functools import partial
 
 import discord
 from discord.ext import commands
-
-# ---------- tiny keep-alive web server for Render Web Service ----------
 from flask import Flask
+
+# ---------------- keep-alive (Render web service) ----------------
 app = Flask(__name__)
 
 @app.route("/")
@@ -49,13 +17,10 @@ def health():
     return "ok", 200
 
 def keep_alive():
-    port = int(os.getenv("PORT", "10000"))  # Render provides $PORT
-    threading.Thread(
-        target=lambda: app.run(host="0.0.0.0", port=port),
-        daemon=True
-    ).start()
+    port = int(os.getenv("PORT", "10000"))
+    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=port), daemon=True).start()
 
-# ---------- optional libs for config loading ----------
+# ---------------- optional libs for config sources ----------------
 try:
     import gspread
     from google.oauth2.service_account import Credentials
@@ -67,17 +32,18 @@ try:
 except Exception:
     pd = None
 
+# ---------------- logging ----------------
 log = logging.getLogger("c1c-claims")
 logging.basicConfig(level=logging.INFO)
 
-# ---------- discord client ----------
+# ---------------- discord client ----------------
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.guilds = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ---------- runtime config ----------
+# ---------------- runtime config ----------------
 CFG = {
     "public_claim_thread_id": None,
     "levels_channel_id": None,
@@ -93,17 +59,14 @@ CFG = {
     "embed_footer_text": "C1C Achievements",
     "embed_footer_icon": None,
 }
-
 CATEGORIES: List[dict] = []
 ACHIEVEMENTS: Dict[str, dict] = {}
 LEVELS: List[dict] = []
 REASONS: Dict[str, str] = {}
-
-# meta about current config load
 CONFIG_META = {"source": "—", "loaded_at": None}
 _AUTO_REFRESH_TASK: Optional[asyncio.Task] = None
 
-# ---------- config loading ----------
+# ---------------- config loading ----------------
 def _svc_creds():
     raw = os.getenv("SERVICE_ACCOUNT_JSON", "").strip()
     if not raw:
@@ -114,8 +77,7 @@ def _svc_creds():
 
 def _truthy(x) -> bool:
     if isinstance(x, bool): return x
-    s = str(x or "").strip().lower()
-    return s in ("true", "yes", "y", "1", "wahr")
+    return str(x or "").strip().lower() in ("true", "yes", "y", "1", "wahr")
 
 def _set_or_default(d: dict, key: str, default):
     val = d.get(key, default)
@@ -124,19 +86,13 @@ def _set_or_default(d: dict, key: str, default):
     return val if val not in (None, "") else default
 
 def _to_str(x) -> str:
-    """Coerce any cell value to a clean string (handles ints/floats from Excel/Sheets)."""
-    if x is None:
-        return ""
-    if isinstance(x, float):
-        return str(int(x)) if x.is_integer() else str(x)
-    if isinstance(x, int):
-        return str(x)
+    if x is None: return ""
+    if isinstance(x, float): return str(int(x)) if x.is_integer() else str(x)
+    if isinstance(x, int): return str(x)
     return str(x)
 
 def _color_from_hex(hex_str: Optional[str]) -> Optional[discord.Color]:
-    """Be tolerant: accept '#14532D', '14532D', or even numeric cells."""
-    if hex_str in (None, ""):
-        return None
+    if hex_str in (None, ""): return None
     try:
         s = _to_str(hex_str).strip().lstrip("#")
         return discord.Color(int(s, 16))
@@ -144,27 +100,24 @@ def _color_from_hex(hex_str: Optional[str]) -> Optional[discord.Color]:
         return None
 
 def load_config():
-    """Try Google Sheets first, then local Excel. Logs strong diagnostics for each step."""
     sid   = os.getenv("CONFIG_SHEET_ID", "").strip()
     local = os.getenv("LOCAL_CONFIG_XLSX", "").strip()
     global CFG, CATEGORIES, ACHIEVEMENTS, LEVELS, REASONS, CONFIG_META
 
-    # BOOT DIAGNOSTIC
     log.info(f"[boot] CONFIG_SHEET_ID set={bool(sid)} | LOCAL_CONFIG_XLSX set={bool(local)} | "
              f"gspread_loaded={gspread is not None} | pandas_loaded={pd is not None}")
 
     loaded = False
     source = "—"
 
-    # ---- Google Sheets ----
+    # Google Sheets
     if sid and gspread:
         try:
             creds = _svc_creds()
             if not creds:
-                raise RuntimeError("SERVICE_ACCOUNT_JSON missing/invalid for Google Sheets")
+                raise RuntimeError("SERVICE_ACCOUNT_JSON missing/invalid")
             gc = gspread.authorize(creds)
             sh = gc.open_by_key(sid)
-            log.info("[boot] Opening Google Sheet succeeded")
 
             row = sh.worksheet("General").get_all_records()[0]
             CFG.update({
@@ -189,19 +142,18 @@ def load_config():
             except Exception:
                 LEVELS = []
             REASONS = {r["code"]: r["message"] for r in sh.worksheet("Reasons").get_all_records()}
+
             loaded = True
             source = "Google Sheets"
             log.info("Config loaded from Google Sheets")
         except Exception as e:
             log.warning(f"GSheet load failed: {e}", exc_info=True)
 
-    # ---- Local Excel ----
+    # Local Excel
     if not loaded and local and pd:
         try:
             if not os.path.isabs(local):
-                # make it absolute relative to the project src on Render
                 local = os.path.join("/opt/render/project/src", local)
-            log.info(f"[boot] Attempting Excel load from: {local}")
             xl = pd.ExcelFile(local)
             gen = pd.read_excel(xl, "General").to_dict("records")[0]
             CFG.update({
@@ -226,6 +178,7 @@ def load_config():
             except Exception:
                 LEVELS = []
             REASONS = {r["code"]: r["message"] for r in pd.read_excel(xl, "Reasons").to_dict("records")}
+
             loaded = True
             source = "Excel file"
             log.info("Config loaded from Excel")
@@ -238,11 +191,10 @@ def load_config():
     CONFIG_META["source"] = source
     CONFIG_META["loaded_at"] = datetime.datetime.utcnow()
 
-# ---------- helpers ----------
+# ---------------- helpers ----------------
 def _is_image(att: discord.Attachment) -> bool:
     ct = (att.content_type or "").lower()
-    if ct in CFG["allowed_mimes"]:
-        return True
+    if ct in CFG["allowed_mimes"]: return True
     fn = att.filename.lower()
     return fn.endswith(".png") or fn.endswith(".jpg") or fn.endswith(".jpeg")
 
@@ -270,33 +222,22 @@ def _category_by_key(cat_key: str) -> Optional[dict]:
 EMOJI_TAG_RE = re.compile(r"^<a?:\w+:\d+>$")
 
 def resolve_emoji_text(guild: discord.Guild, value: Optional[str], fallback: Optional[str]=None) -> str:
-    """
-    Accepts unicode emoji, <:name:id>, numeric id, or a name.
-    Works even if the sheet gives us numbers (int/float).
-    """
     v = _to_str(value).strip()
     if not v:
         v = _to_str(fallback).strip()
     if not v:
         return ""
-
-    # Already a proper <...:id> tag
     if EMOJI_TAG_RE.match(v):
         return v
-
-    # Pure numeric: treat as a custom emoji ID
     if v.isdigit():
         e = discord.utils.get(guild.emojis, id=int(v))
         return f"<{'a' if e.animated else ''}:{e.name}:{e.id}>" if e else ""
-
-    # Otherwise, try by name; if not found, assume it's unicode and return as-is
     e = discord.utils.get(guild.emojis, name=v)
     return f"<{'a' if e.animated else ''}:{e.name}:{e.id}>" if e else v
 
 def _inject_tokens(text: str, *, user: discord.Member, role: discord.Role, emoji: str) -> str:
     return (text or "").replace("{user}", user.mention).replace("{role}", role.name).replace("{emoji}", emoji)
 
-# --- safe embed sender + channel resolver for "here/#channel/id" ---
 async def safe_send_embed(dest, embed: discord.Embed):
     try:
         return await dest.send(embed=embed)
@@ -320,11 +261,9 @@ def _resolve_target_channel(ctx: commands.Context, where: Optional[str]):
     digits = re.sub(r"[^\d]", "", where)
     if digits.isdigit():
         ch = ctx.guild.get_channel(int(digits))
-        if ch:
-            return ch
+        if ch: return ch
     return ctx.channel
 
-# --- pretty-format IDs to names/mentions for !testconfig / !configstatus ---
 async def _fmt_chan_or_thread(guild: discord.Guild, chan_id: int | None) -> str:
     if not chan_id:
         return "—"
@@ -348,7 +287,7 @@ def _fmt_role(guild: discord.Guild, role_id: int | None) -> str:
         return f"(unknown role) `{role_id}`"
     return f"{r.mention} — **{r.name}** `{role_id}`"
 
-# ---------- embed builders ----------
+# ---------------- embed builders (no Embed.Empty usage) ----------------
 def build_achievement_embed(guild: discord.Guild, user: discord.Member, role: discord.Role, ach_row: dict) -> discord.Embed:
     cat = _category_by_key(ach_row.get("category") or "")
     emoji = resolve_emoji_text(guild, ach_row.get("EmojiNameOrId"), fallback=(cat or {}).get("emoji"))
@@ -378,7 +317,6 @@ def build_achievement_embed(guild: discord.Guild, user: discord.Member, role: di
     if hero:
         emb.set_image(url=hero)
     return emb
-
 
 def build_group_embed(guild: discord.Guild, user: discord.Member, items: List[Tuple[discord.Role, dict]]) -> discord.Embed:
     r0, a0 = items[0]
@@ -413,7 +351,6 @@ def build_group_embed(guild: discord.Guild, user: discord.Member, items: List[Tu
             emb.set_footer(text=footer_text)
     return emb
 
-
 def build_level_embed(guild: discord.Guild, user: discord.Member, row: dict) -> discord.Embed:
     emoji = resolve_emoji_text(guild, row.get("EmojiNameOrId"))
     role_for_tokens = user.top_role if user.top_role else user.guild.default_role
@@ -440,8 +377,7 @@ def build_level_embed(guild: discord.Guild, user: discord.Member, row: dict) -> 
             emb.set_footer(text=footer_text)
     return emb
 
-
-# ---------- grouping buffer ----------
+# ---------------- grouping buffer ----------------
 GROUP: Dict[int, Dict[int, dict]] = {}
 
 async def _flush_group(guild: discord.Guild, user_id: int):
@@ -475,7 +411,7 @@ def _buffer_item(guild: discord.Guild, user_id: int, role: discord.Role, ach: di
             pass
     e["task"] = asyncio.create_task(_delay())
 
-# ---------- GK Review views ----------
+# ---------------- GK Review views ----------------
 class TryAgainView(discord.ui.View):
     def __init__(self, owner_id: int, att: Optional[discord.Attachment]):
         super().__init__(timeout=600)
@@ -536,11 +472,12 @@ class GKReview(discord.ui.View):
         v.add_item(sel)
         await itx.response.send_message("Choose replacement role:", view=v, ephemeral=True)
 
-# ---------- Pickers ----------
+# ---------------- Pickers ----------------
 class BaseView(discord.ui.View):
     def __init__(self, owner_id: int, timeout=600):
         super().__init__(timeout=timeout)
         self.owner_id = owner_id
+        self.message: Optional[discord.Message] = None
 
     async def on_timeout(self):
         try:
@@ -647,7 +584,7 @@ class RolePicker(BaseView):
         key = itx.data["values"][0]
         await process_claim(itx, key, self.att, self.batch)
 
-# ---------- Flow helpers ----------
+# ---------------- Flow helpers ----------------
 async def show_category_picker(itx: discord.Interaction, attachment: Optional[discord.Attachment], batch_list: Optional[List[discord.Attachment]] = None):
     v = CategoryPicker(itx.user.id, attachment, batch_list=batch_list)
     try:
@@ -666,7 +603,7 @@ async def show_role_picker(itx: discord.Interaction, cat_key: str, attachment: O
         m = await itx.followup.send(f"**{cat_key}** — choose the exact achievement:", view=v)
         v.message = m
 
-# ---------- Claim processing ----------
+# ---------------- Claim processing ----------------
 async def finalize_grant(guild: discord.Guild, user_id: int, ach_key: str):
     ach = ACHIEVEMENTS.get(ach_key)
     if not ach: return
@@ -716,7 +653,6 @@ async def process_claim(itx: discord.Interaction, ach_key: str, att: Optional[di
             await itx.channel.send(f"✨ **{role.name}** unlocked for {itx.user.mention}!")
             return
 
-        # MOD_APPROVE / OCR → GK review
         rid = CFG.get("guardian_knights_role_id")
         ping = f"<@&{rid}>" if rid else "**Guardian Knights**"
         emb = discord.Embed(
@@ -736,30 +672,30 @@ async def process_claim(itx: discord.Interaction, ach_key: str, att: Optional[di
     else:
         await _one(att)
 
-# ---------- staff guard ----------
+# ---------------- staff guard ----------------
 def _is_staff(member: discord.Member) -> bool:
     if member.guild_permissions.manage_guild:
         return True
     rid = CFG.get("guardian_knights_role_id")
     return bool(rid and any(r.id == rid for r in member.roles))
 
-# ---------- test/admin commands ----------
+# ---------------- admin/test commands ----------------
 @bot.command(name="testconfig")
-async def testconfig(ctx: commands.Context):
-    if not _is_staff(ctx.author):
-        return await ctx.send("Staff only.")
-    thread_txt = await _fmt_chan_or_thread(ctx.guild, CFG.get("public_claim_thread_id"))
-    levels_txt = await _fmt_chan_or_thread(ctx.guild, CFG.get("levels_channel_id"))
-    audit_txt  = await _fmt_chan_or_thread(ctx.guild, CFG.get("audit_log_channel_id"))
-    gk_txt     = _fmt_role(ctx.guild, CFG.get("guardian_knights_role_id"))
+async def testconfig(cmdx: commands.Context):
+    if not _is_staff(cmdx.author):
+        return await cmdx.send("Staff only.")
+
+    thread_txt = await _fmt_chan_or_thread(cmdx.guild, CFG.get("public_claim_thread_id"))
+    levels_txt = await _fmt_chan_or_thread(cmdx.guild, CFG.get("levels_channel_id"))
+    audit_txt  = await _fmt_chan_or_thread(cmdx.guild, CFG.get("audit_log_channel_id"))
+    gk_txt     = _fmt_role(cmdx.guild, CFG.get("guardian_knights_role_id"))
     loaded_at = CONFIG_META["loaded_at"].strftime("%Y-%m-%d %H:%M:%S UTC") if CONFIG_META["loaded_at"] else "—"
+
     emb = discord.Embed(title="Current configuration", color=discord.Color.blurple())
-if CFG.get("embed_author_name"):
-    icon = CFG.get("embed_author_icon")
-    if icon:
-        emb.set_author(name=CFG["embed_author_name"], icon_url=icon)
-    else:
-        emb.set_author(name=CFG["embed_author_name"])
+    if CFG.get("embed_author_name"):
+        icon = CFG.get("embed_author_icon")
+        if icon: emb.set_author(name=CFG["embed_author_name"], icon_url=icon)
+        else:    emb.set_author(name=CFG["embed_author_name"])
     emb.add_field(name="Claims thread", value=thread_txt, inline=False)
     emb.add_field(name="Levels channel", value=levels_txt, inline=False)
     emb.add_field(name="Audit-log channel", value=audit_txt, inline=False)
@@ -770,7 +706,7 @@ if CFG.get("embed_author_name"):
         value=f"Achievements: **{len(ACHIEVEMENTS)}**\nCategories: **{len(CATEGORIES)}**\nLevels: **{len(LEVELS)}**",
         inline=False,
     )
-    await safe_send_embed(ctx, emb)
+    await safe_send_embed(cmdx, emb)
 
 @bot.command(name="configstatus")
 async def configstatus(ctx: commands.Context):
@@ -860,7 +796,7 @@ async def testlevel(ctx: commands.Context, *, args: str = ""):
 async def ping(ctx: commands.Context):
     await ctx.send("✅ Live and listening.")
 
-# ---------- command error reporter (so failures aren’t silent) ----------
+# ---------------- error reporter ----------------
 @bot.event
 async def on_command_error(ctx: commands.Context, error: Exception):
     if isinstance(error, commands.CommandNotFound):
@@ -872,14 +808,14 @@ async def on_command_error(ctx: commands.Context, error: Exception):
     tb = "".join(traceback.format_exception(type(error), error, error.__traceback__))
     log.error("Command error:\n%s", tb)
 
-# ---------- message listener (levels & claims) ----------
+# ---------------- message listener ----------------
 @bot.event
 async def on_message(msg: discord.Message):
     if msg.author.bot:
         return
     await bot.process_commands(msg)
 
-    # Level triggers by substring
+    # Levels
     try:
         for row in LEVELS:
             trig = row.get("trigger_contains") or row.get("Title") or ""
@@ -892,7 +828,7 @@ async def on_message(msg: discord.Message):
     except Exception:
         pass
 
-    # Claims only in the configured thread
+    # Claims only in configured thread
     if not CFG.get("public_claim_thread_id") or msg.channel.id != CFG.get("public_claim_thread_id"):
         return
     images = [a for a in msg.attachments if _is_image(a)]
@@ -907,7 +843,7 @@ async def on_message(msg: discord.Message):
         m = await msg.reply(f"**I found {len(images)} screenshots. What do you want to do?**", view=view, mention_author=False)
         view.message = m
 
-# ---------- startup & optional auto-refresh ----------
+# ---------------- startup ----------------
 async def _auto_refresh_loop(minutes: int):
     while True:
         try:
@@ -928,9 +864,8 @@ async def on_ready():
         await bot.close()
         return
 
-    # start background auto-refresh if enabled
-    global _AUTO_REFRESH_TASK
     mins = int(os.getenv("CONFIG_AUTO_REFRESH_MINUTES", "0") or "0")
+    global _AUTO_REFRESH_TASK
     if mins > 0 and _AUTO_REFRESH_TASK is None:
         _AUTO_REFRESH_TASK = asyncio.create_task(_auto_refresh_loop(mins))
         log.info(f"Auto-refresh enabled: every {mins} minutes")
@@ -939,5 +874,5 @@ if __name__ == "__main__":
     token = os.getenv("DISCORD_BOT_TOKEN") or os.getenv("DISCORD_TOKEN")
     if not token:
         raise SystemExit("Set DISCORD_BOT_TOKEN")
-    keep_alive()  # keep the Web Service alive on Render
+    keep_alive()
     bot.run(token)
