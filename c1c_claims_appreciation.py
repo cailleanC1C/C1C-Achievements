@@ -270,7 +270,7 @@ def _inject_tokens(text: str, *, user: discord.Member, role: discord.Role, emoji
     return (text or "").replace("{user}", user.mention).replace("{role}", role.name).replace("{emoji}", emoji)
 
 # --- NEW: safe embed sender + channel resolver for "here/#channel/id" ---
-async def safe_send_embed(dest: discord.abc.MessageableChannel, embed: discord.Embed):
+async def safe_send_embed(dest, embed: discord.Embed):
     """Send an embed and fall back to text if embeds are blocked."""
     try:
         return await dest.send(embed=embed)
@@ -306,6 +306,31 @@ def _resolve_target_channel(ctx: commands.Context, where: Optional[str]):
             return ch
 
     return ctx.channel
+
+# --- NEW: pretty-format IDs to names/mentions for !testconfig ---
+async def _fmt_chan_or_thread(guild: discord.Guild, chan_id: int | None) -> str:
+    """Return a human string like: #levels — Levels `1050...` (works for channels and threads)."""
+    if not chan_id:
+        return "—"
+    obj = guild.get_channel(chan_id)
+    if obj is None:
+        try:
+            obj = await guild.fetch_channel(chan_id)  # also resolves threads not in cache
+        except Exception:
+            obj = None
+    if obj is None:
+        return f"(unknown) `{chan_id}`"
+    name = getattr(obj, "name", "unknown")
+    mention = getattr(obj, "mention", f"`#{name}`")
+    return f"{mention} — **{name}** `{chan_id}`"
+
+def _fmt_role(guild: discord.Guild, role_id: int | None) -> str:
+    if not role_id:
+        return "—"
+    r = guild.get_role(role_id)
+    if not r:
+        return f"(unknown role) `{role_id}`"
+    return f"{r.mention} — **{r.name}** `{role_id}`"
 
 # ---------- embed builders ----------
 def build_achievement_embed(guild: discord.Guild, user: discord.Member, role: discord.Role, ach_row: dict) -> discord.Embed:
@@ -665,16 +690,27 @@ def _is_staff(member: discord.Member) -> bool:
 async def testconfig(ctx: commands.Context):
     if not _is_staff(ctx.author):
         return await ctx.send("Staff only.")
-    lines = [
-        f"Thread: {CFG.get('public_claim_thread_id')}",
-        f"Levels channel: {CFG.get('levels_channel_id')}",
-        f"Audit: {CFG.get('audit_log_channel_id')}",
-        f"GK role: {CFG.get('guardian_knights_role_id')}",
-        f"Achievements: {len(ACHIEVEMENTS)}",
-        f"Categories: {len(CATEGORIES)}",
-        f"Levels: {len(LEVELS)}",
-    ]
-    await ctx.send("```\n" + "\n".join(lines) + "\n```")
+
+    thread_txt = await _fmt_chan_or_thread(ctx.guild, CFG.get("public_claim_thread_id"))
+    levels_txt = await _fmt_chan_or_thread(ctx.guild, CFG.get("levels_channel_id"))
+    audit_txt  = await _fmt_chan_or_thread(ctx.guild, CFG.get("audit_log_channel_id"))
+    gk_txt     = _fmt_role(ctx.guild, CFG.get("guardian_knights_role_id"))
+
+    emb = discord.Embed(title="Current configuration", color=discord.Color.blurple())
+    if CFG.get("embed_author_name"):
+        emb.set_author(name=CFG["embed_author_name"], icon_url=CFG.get("embed_author_icon") or discord.Embed.Empty)
+
+    emb.add_field(name="Claims thread", value=thread_txt, inline=False)
+    emb.add_field(name="Levels channel", value=levels_txt, inline=False)
+    emb.add_field(name="Audit-log channel", value=audit_txt, inline=False)
+    emb.add_field(name="Guardian Knights role", value=gk_txt, inline=False)
+    emb.add_field(
+        name="Loaded rows",
+        value=f"Achievements: **{len(ACHIEVEMENTS)}**\nCategories: **{len(CATEGORIES)}**\nLevels: **{len(LEVELS)}**",
+        inline=False,
+    )
+
+    await safe_send_embed(ctx, emb)
 
 @bot.command(name="testach")
 async def testach(ctx: commands.Context, key: str, where: Optional[str] = None):
