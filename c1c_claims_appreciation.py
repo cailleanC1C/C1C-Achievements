@@ -1,28 +1,38 @@
-# C1C Appreciation + Claims Bot (reminder-style embeds) — Web Service w/ keep-alive
+# C1C Appreciation + Claims Bot — Web Service (Flask keep-alive) + boot diagnostics
 # ---------------------------------------------------------------------------------
-# Tabs expected in your config sheet:
-#   General, Categories, Achievements, Levels, Reasons
+# Config sources (choose ONE):
+#   • Google Sheets (live):   CONFIG_SHEET_ID + SERVICE_ACCOUNT_JSON
+#   • Local Excel fallback:   LOCAL_CONFIG_XLSX = /opt/render/project/src/C1C_Claims_Config_reminderStyle.xlsx
 #
 # Env:
 #   DISCORD_BOT_TOKEN=...
-#   CONFIG_SHEET_ID=...            # optional (Google Sheet ID)
-#   SERVICE_ACCOUNT_JSON=...       # optional (inline JSON or path)
-#   LOCAL_CONFIG_XLSX=/path.xlsx   # fallback if no Google Sheet
+#   CONFIG_SHEET_ID=...                # optional
+#   SERVICE_ACCOUNT_JSON=...           # optional (inline JSON or path to JSON)
+#   LOCAL_CONFIG_XLSX=/opt/render/project/src/C1C_Claims_Config_reminderStyle.xlsx   # optional
 #
-# Deps:
-#   discord.py==2.3.*
-#   Flask
-#   (optional) gspread google-auth pandas openpyxl
+# Deps (requirements.txt):
+#   discord.py==2.3.2
+#   Flask==3.0.3
+#   pandas==2.2.2
+#   openpyxl==3.1.5
+#   gspread==6.1.2
+#   google-auth==2.31.0
+#
+# Commands:
+#   !ping, !testconfig, !testach <key>, !testlevel <query>, !testemoji <value>
+#
+# Flow:
+#   Proof thread → [Use first / Choose image / Use all / Cancel] → Category → Role → AUTO_GRANT or GK review
+#   Big role icon pulled from the Discord role's icon, embeds use Title/Body/Footer from sheet, tokens {user}/{role}/{emoji}
 
-import os, re, json, asyncio, logging, datetime
+import os, re, json, asyncio, logging, datetime, threading
 from typing import Optional, List, Dict, Tuple
 from functools import partial
 
 import discord
 from discord.ext import commands
 
-# --------- tiny keep-alive web server for Render Web Service ----------
-import threading
+# ---------- tiny keep-alive web server for Render Web Service ----------
 from flask import Flask
 app = Flask(__name__)
 
@@ -37,12 +47,13 @@ def keep_alive():
         daemon=True
     ).start()
 
-# Optional deps for config loading
+# ---------- optional libs for config loading ----------
 try:
     import gspread
     from google.oauth2.service_account import Credentials
 except Exception:
     gspread = None
+
 try:
     import pandas as pd
 except Exception:
@@ -51,14 +62,14 @@ except Exception:
 log = logging.getLogger("c1c-claims")
 logging.basicConfig(level=logging.INFO)
 
-# --------- Discord client ----------
+# ---------- discord client ----------
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.guilds = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# --------- Runtime config ----------
+# ---------- runtime config ----------
 CFG = {
     "public_claim_thread_id": None,
     "levels_channel_id": None,
@@ -80,7 +91,7 @@ ACHIEVEMENTS: Dict[str, dict] = {}
 LEVELS: List[dict] = []
 REASONS: Dict[str, str] = {}
 
-# --------- Config loading ----------
+# ---------- config loading ----------
 def _svc_creds():
     raw = os.getenv("SERVICE_ACCOUNT_JSON", "").strip()
     if not raw:
@@ -109,21 +120,26 @@ def _color_from_hex(hex_str: Optional[str]) -> Optional[discord.Color]:
         return None
 
 def load_config():
-    sid = os.getenv("CONFIG_SHEET_ID", "").strip()
+    """Try Google Sheets first, then local Excel. Logs strong diagnostics for each step."""
+    sid   = os.getenv("CONFIG_SHEET_ID", "").strip()
     local = os.getenv("LOCAL_CONFIG_XLSX", "").strip()
     global CFG, CATEGORIES, ACHIEVEMENTS, LEVELS, REASONS
+
+    # BOOT DIAGNOSTIC
+    log.info(f"[boot] CONFIG_SHEET_ID set={bool(sid)} | LOCAL_CONFIG_XLSX set={bool(local)} | "
+             f"gspread_loaded={gspread is not None} | pandas_loaded={pd is not None}")
+
     loaded = False
 
-log.info(f"CONFIG_SHEET_ID present={bool(sheet_id)} gspread_loaded={gspread is not None}")
-        except Exception as e:
-            log.warning(f"GSheet load failed: {e}", exc_info=True)
-
-
+    # ---- Google Sheets ----
     if sid and gspread:
         try:
             creds = _svc_creds()
+            if not creds:
+                raise RuntimeError("SERVICE_ACCOUNT_JSON missing/invalid for Google Sheets")
             gc = gspread.authorize(creds)
             sh = gc.open_by_key(sid)
+            log.info("[boot] Opening Google Sheet succeeded")
 
             row = sh.worksheet("General").get_all_records()[0]
             CFG.update({
@@ -149,12 +165,17 @@ log.info(f"CONFIG_SHEET_ID present={bool(sheet_id)} gspread_loaded={gspread is n
                 LEVELS = []
             REASONS = {r["code"]: r["message"] for r in sh.worksheet("Reasons").get_all_records()}
             loaded = True
-            log.info("Loaded from Google Sheets")
+            log.info("Config loaded from Google Sheets")
         except Exception as e:
-            log.warning(f"GSheet load failed: {e}")
+            log.warning(f"GSheet load failed: {e}", exc_info=True)
 
+    # ---- Local Excel ----
     if not loaded and local and pd:
         try:
+            if not os.path.isabs(local):
+                # make it absolute relative to the project src on Render
+                local = os.path.join("/opt/render/project/src", local)
+            log.info(f"[boot] Attempting Excel load from: {local}")
             xl = pd.ExcelFile(local)
             gen = pd.read_excel(xl, "General").to_dict("records")[0]
             CFG.update({
@@ -180,14 +201,14 @@ log.info(f"CONFIG_SHEET_ID present={bool(sheet_id)} gspread_loaded={gspread is n
                 LEVELS = []
             REASONS = {r["code"]: r["message"] for r in pd.read_excel(xl, "Reasons").to_dict("records")}
             loaded = True
-            log.info("Loaded from Excel")
+            log.info("Config loaded from Excel")
         except Exception as e:
-            log.error(f"Excel load failed: {e}")
+            log.error(f"Excel load failed: {e}", exc_info=True)
 
     if not loaded:
         raise RuntimeError("No config loaded. Set CONFIG_SHEET_ID (+SERVICE_ACCOUNT_JSON) or LOCAL_CONFIG_XLSX.")
 
-# --------- helpers ----------
+# ---------- helpers ----------
 def _is_image(att: discord.Attachment) -> bool:
     ct = (att.content_type or "").lower()
     if ct in CFG["allowed_mimes"]:
@@ -220,8 +241,8 @@ EMOJI_TAG_RE = re.compile(r"^<a?:\w+:\d+>$")
 
 def resolve_emoji_text(guild: discord.Guild, value: Optional[str], fallback: Optional[str]=None) -> str:
     """Return a string that renders as an emoji:
-       - literal unicode -> return as-is
-       - <:name:id> / <a:name:id> -> return as-is
+       - literal unicode -> as-is
+       - <:name:id> / <a:name:id> -> as-is
        - numeric id -> find custom emoji by ID
        - name -> find custom emoji by name
     """
@@ -231,23 +252,21 @@ def resolve_emoji_text(guild: discord.Guild, value: Optional[str], fallback: Opt
     if not v:
         return ""
     if EMOJI_TAG_RE.match(v):
-        return v  # already a full tag
+        return v
     if v.isdigit():
         e = discord.utils.get(guild.emojis, id=int(v))
         if e:
             return f"<{'a' if e.animated else ''}:{e.name}:{e.id}>"
         return ""
-    # try by name
     e = discord.utils.get(guild.emojis, name=v)
     if e:
         return f"<{'a' if e.animated else ''}:{e.name}:{e.id}>"
-    # otherwise assume unicode
-    return v
+    return v  # assume unicode
 
 def _inject_tokens(text: str, *, user: discord.Member, role: discord.Role, emoji: str) -> str:
     return (text or "").replace("{user}", user.mention).replace("{role}", role.name).replace("{emoji}", emoji)
 
-# --------- embed builders ----------
+# ---------- embed builders ----------
 def build_achievement_embed(guild: discord.Guild, user: discord.Member, role: discord.Role, ach_row: dict) -> discord.Embed:
     cat = _category_by_key(ach_row.get("category") or "")
     emoji = resolve_emoji_text(guild, ach_row.get("EmojiNameOrId"), fallback=(cat or {}).get("emoji"))
@@ -267,14 +286,8 @@ def build_achievement_embed(guild: discord.Guild, user: discord.Member, role: di
 
 def build_group_embed(guild: discord.Guild, user: discord.Member, items: List[Tuple[discord.Role, dict]]) -> discord.Embed:
     r0, a0 = items[0]
-    cat0 = _category_by_key(a0.get("category") or "")
-    emoji0 = resolve_emoji_text(guild, a0.get("EmojiNameOrId"), fallback=(cat0 or {}).get("emoji"))
     color = _color_from_hex(a0.get("ColorHex")) or (r0.color if getattr(r0.color, "value", 0) else discord.Color.blurple())
-    emb = discord.Embed(
-        title=f"{user.display_name} unlocked {len(items)} achievements",
-        color=color,
-        timestamp=datetime.datetime.utcnow()
-    )
+    emb = discord.Embed(title=f"{user.display_name} unlocked {len(items)} achievements", color=color, timestamp=datetime.datetime.utcnow())
     if CFG.get("embed_author_name"):
         emb.set_author(name=CFG["embed_author_name"], icon_url=CFG.get("embed_author_icon") or discord.Embed.Empty)
     lines = []
@@ -292,11 +305,11 @@ def build_group_embed(guild: discord.Guild, user: discord.Member, items: List[Tu
 
 def build_level_embed(guild: discord.Guild, user: discord.Member, row: dict) -> discord.Embed:
     emoji = resolve_emoji_text(guild, row.get("EmojiNameOrId"))
-    title = _inject_tokens(row.get("Title") or "Level up!", user=user, role=user.top_role if user.top_role else user.guild.default_role, emoji=emoji)
-    body  = _inject_tokens(row.get("Body")  or "{user} leveled up!", user=user, role=user.top_role if user.top_role else user.guild.default_role, emoji=emoji)
-    footer= _inject_tokens(row.get("Footer") or "", user=user, role=user.top_role if user.top_role else user.guild.default_role, emoji=emoji)
+    role_for_tokens = user.top_role if user.top_role else user.guild.default_role
+    title = _inject_tokens(row.get("Title") or "Level up!", user=user, role=role_for_tokens, emoji=emoji)
+    body  = _inject_tokens(row.get("Body")  or "{user} leveled up!", user=user, role=role_for_tokens, emoji=emoji)
+    footer= _inject_tokens(row.get("Footer") or "", user=user, role=role_for_tokens, emoji=emoji)
     color = _color_from_hex(row.get("ColorHex")) or discord.Color.gold()
-
     emb = discord.Embed(title=title, description=body, color=color, timestamp=datetime.datetime.utcnow())
     if CFG.get("embed_author_name"):
         emb.set_author(name=CFG["embed_author_name"], icon_url=CFG.get("embed_author_icon") or discord.Embed.Empty)
@@ -304,7 +317,7 @@ def build_level_embed(guild: discord.Guild, user: discord.Member, row: dict) -> 
         emb.set_footer(text=footer or CFG["embed_footer_text"], icon_url=CFG.get("embed_footer_icon") or discord.Embed.Empty)
     return emb
 
-# --------- grouping buffer ----------
+# ---------- grouping buffer ----------
 GROUP: Dict[int, Dict[int, dict]] = {}
 
 async def _flush_group(guild: discord.Guild, user_id: int):
@@ -338,7 +351,7 @@ def _buffer_item(guild: discord.Guild, user_id: int, role: discord.Role, ach: di
             pass
     e["task"] = asyncio.create_task(_delay())
 
-# --------- GK Review views ----------
+# ---------- GK Review views ----------
 class TryAgainView(discord.ui.View):
     def __init__(self, owner_id: int, att: Optional[discord.Attachment]):
         super().__init__(timeout=600)
@@ -399,7 +412,7 @@ class GKReview(discord.ui.View):
         v.add_item(sel)
         await itx.response.send_message("Choose replacement role:", view=v, ephemeral=True)
 
-# --------- Pickers ----------
+# ---------- Pickers ----------
 class BaseView(discord.ui.View):
     def __init__(self, owner_id: int, timeout=600):
         super().__init__(timeout=timeout)
@@ -510,7 +523,7 @@ class RolePicker(BaseView):
         key = itx.data["values"][0]
         await process_claim(itx, key, self.att, self.batch)
 
-# --------- Flow helpers ----------
+# ---------- Flow helpers ----------
 async def show_category_picker(itx: discord.Interaction, attachment: Optional[discord.Attachment], batch_list: Optional[List[discord.Attachment]] = None):
     v = CategoryPicker(itx.user.id, attachment, batch_list=batch_list)
     try:
@@ -529,7 +542,7 @@ async def show_role_picker(itx: discord.Interaction, cat_key: str, attachment: O
         m = await itx.followup.send(f"**{cat_key}** — choose the exact achievement:", view=v)
         v.message = m
 
-# --------- Claim processing ----------
+# ---------- Claim processing ----------
 async def finalize_grant(guild: discord.Guild, user_id: int, ach_key: str):
     ach = ACHIEVEMENTS.get(ach_key)
     if not ach: return
@@ -579,7 +592,7 @@ async def process_claim(itx: discord.Interaction, ach_key: str, att: Optional[di
             await itx.channel.send(f"✨ **{role.name}** unlocked for {itx.user.mention}!")
             return
 
-        # OCR/MOD_APPROVE -> GK review
+        # MOD_APPROVE / OCR → GK review
         rid = CFG.get("guardian_knights_role_id")
         ping = f"<@&{rid}>" if rid else "**Guardian Knights**"
         emb = discord.Embed(
@@ -599,14 +612,14 @@ async def process_claim(itx: discord.Interaction, ach_key: str, att: Optional[di
     else:
         await _one(att)
 
-# --------- Staff guard for test cmds ----------
+# ---------- staff guard for test cmds ----------
 def _is_staff(member: discord.Member) -> bool:
     if member.guild_permissions.manage_guild:
         return True
     rid = CFG.get("guardian_knights_role_id")
     return bool(rid and any(r.id == rid for r in member.roles))
 
-# --------- Test commands ----------
+# ---------- test commands ----------
 @bot.command(name="testconfig")
 async def testconfig(ctx: commands.Context):
     if not _is_staff(ctx.author):
@@ -661,14 +674,14 @@ async def testemoji(ctx: commands.Context, *, value: str):
 async def ping(ctx: commands.Context):
     await ctx.send("✅ Live and listening.")
 
-# --------- Message listener (levels & claims) ----------
+# ---------- message listener (levels & claims) ----------
 @bot.event
 async def on_message(msg: discord.Message):
     if msg.author.bot:
         return
     await bot.process_commands(msg)
 
-    # level triggers by substring
+    # Level triggers by substring
     try:
         for row in LEVELS:
             trig = row.get("trigger_contains") or row.get("Title") or ""
@@ -681,7 +694,7 @@ async def on_message(msg: discord.Message):
     except Exception:
         pass
 
-    # Claims work only in the configured thread
+    # Claims only in the configured thread
     if not CFG.get("public_claim_thread_id") or msg.channel.id != CFG["public_claim_thread_id"]:
         return
     images = [a for a in msg.attachments if _is_image(a)]
@@ -696,7 +709,7 @@ async def on_message(msg: discord.Message):
         m = await msg.reply(f"**I found {len(images)} screenshots. What do you want to do?**", view=view, mention_author=False)
         view.message = m
 
-# --------- Startup ----------
+# ---------- startup ----------
 @bot.event
 async def on_ready():
     log.info(f"Logged in as {bot.user} ({bot.user.id})")
