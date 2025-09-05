@@ -1,2 +1,7 @@
-discord.py
-flask
+discord.py==2.3.2
+Flask
+pandas
+openpyxl
+# If you’ll use Google Sheets (live editing):
+gspread
+google-auth
