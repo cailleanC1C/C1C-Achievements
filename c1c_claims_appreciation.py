@@ -55,7 +55,7 @@ CFG = {
     "allowed_mimes": {"image/png", "image/jpeg"},
     "locale": "en",
     "hud_language": "EN",
-    "embed_author_name": "The Scribe That Knows Too Much",
+    "embed_author_name": None,         # blank disables the author row
     "embed_author_icon": None,
     "embed_footer_text": "C1C Achievements",
     "embed_footer_icon": None,
@@ -113,6 +113,22 @@ def _safe_icon(icon_val: Optional[str]) -> Optional[str]:
         pass
     return None
 
+def _opt(row: dict, key: str, default=None):
+    """Preserve blank cell as None; otherwise return value or default."""
+    if key in row:
+        val = row.get(key)
+        s = _to_str(val).strip()
+        return None if s == "" else val
+    return default
+
+def _clean(text: Optional[str]) -> str:
+    """Turn literal '\n' into real newlines and normalize line endings."""
+    s = _to_str(text)
+    if not s:
+        return ""
+    s = s.replace("\\n", "\n").replace("\r\n", "\n").replace("\r", "\n")
+    return s
+
 def load_config():
     sid   = os.getenv("CONFIG_SHEET_ID", "").strip()
     local = os.getenv("LOCAL_CONFIG_XLSX", "").strip()
@@ -144,10 +160,10 @@ def load_config():
                 "allowed_mimes": _set_or_default(row, "allowed_mimes", {"image/png","image/jpeg"}),
                 "locale": row.get("locale") or "en",
                 "hud_language": row.get("hud_language") or "EN",
-                "embed_author_name": row.get("embed_author_name") or CFG["embed_author_name"],
-                "embed_author_icon": row.get("embed_author_icon") or None,
-                "embed_footer_text": row.get("embed_footer_text") or CFG["embed_footer_text"],
-                "embed_footer_icon": row.get("embed_footer_icon") or None,
+                "embed_author_name": _opt(row, "embed_author_name", CFG["embed_author_name"]),
+                "embed_author_icon": _opt(row, "embed_author_icon", CFG["embed_author_icon"]),
+                "embed_footer_text": _opt(row, "embed_footer_text", CFG["embed_footer_text"]) or CFG["embed_footer_text"],
+                "embed_footer_icon": _opt(row, "embed_footer_icon", CFG["embed_footer_icon"]),
             })
             CATEGORIES = sh.worksheet("Categories").get_all_records()
             ACHIEVEMENTS = {r["key"]: r for r in sh.worksheet("Achievements").get_all_records() if _truthy(r.get("Active", True))}
@@ -180,10 +196,10 @@ def load_config():
                 "allowed_mimes": _set_or_default(gen, "allowed_mimes", {"image/png","image/jpeg"}),
                 "locale": gen.get("locale") or "en",
                 "hud_language": gen.get("hud_language") or "EN",
-                "embed_author_name": gen.get("embed_author_name") or CFG["embed_author_name"],
-                "embed_author_icon": gen.get("embed_author_icon") or None,
-                "embed_footer_text": gen.get("embed_footer_text") or CFG["embed_footer_text"],
-                "embed_footer_icon": gen.get("embed_footer_icon") or None,
+                "embed_author_name": _opt(gen, "embed_author_name", CFG["embed_author_name"]),
+                "embed_author_icon": _opt(gen, "embed_author_icon", CFG["embed_author_icon"]),
+                "embed_footer_text": _opt(gen, "embed_footer_text", CFG["embed_footer_text"]) or CFG["embed_footer_text"],
+                "embed_footer_icon": _opt(gen, "embed_footer_icon", CFG["embed_footer_icon"]),
             })
             CATEGORIES = pd.read_excel(xl, "Categories").to_dict("records")
             ACHIEVEMENTS = {r["key"]: r for r in pd.read_excel(xl, "Achievements").to_dict("records") if _truthy(r.get("Active", True))}
@@ -301,13 +317,13 @@ def _fmt_role(guild: discord.Guild, role_id: int | None) -> str:
         return f"(unknown role) `{role_id}`"
     return f"{r.mention} — **{r.name}** `{role_id}`"
 
-# ---------------- embed builders (safe icon URLs) ----------------
+# ---------------- embed builders (safe icon URLs + \n cleanup) ----------------
 def build_achievement_embed(guild: discord.Guild, user: discord.Member, role: discord.Role, ach_row: dict) -> discord.Embed:
     cat = _category_by_key(ach_row.get("category") or "")
     emoji = resolve_emoji_text(guild, ach_row.get("EmojiNameOrId"), fallback=(cat or {}).get("emoji"))
-    title = _inject_tokens(ach_row.get("Title") or f"{role.name} unlocked!", user=user, role=role, emoji=emoji)
-    body  = _inject_tokens(ach_row.get("Body")  or f"{user.mention} just unlocked **{role.name}**.", user=user, role=role, emoji=emoji)
-    footer= _inject_tokens(ach_row.get("Footer") or "", user=user, role=role, emoji=emoji)
+    title  = _inject_tokens(_clean(ach_row.get("Title"))  or f"{role.name} unlocked!", user=user, role=role, emoji=emoji)
+    body   = _inject_tokens(_clean(ach_row.get("Body"))   or f"{user.mention} just unlocked **{role.name}**.", user=user, role=role, emoji=emoji)
+    footer = _inject_tokens(_clean(ach_row.get("Footer")) or "", user=user, role=role, emoji=emoji)
     color = _color_from_hex(ach_row.get("ColorHex")) or (role.color if getattr(role.color, "value", 0) else discord.Color.blurple())
 
     emb = discord.Embed(title=title, description=body, color=color, timestamp=datetime.datetime.utcnow())
@@ -342,7 +358,7 @@ def build_group_embed(guild: discord.Guild, user: discord.Member, items: List[Tu
     for r, a in items:
         cat = _category_by_key(a.get("category") or "")
         emoji = resolve_emoji_text(guild, a.get("EmojiNameOrId"), fallback=(cat or {}).get("emoji"))
-        body = _inject_tokens(a.get("Body") or f"{user.mention} just unlocked **{r.name}**.", user=user, role=r, emoji=emoji)
+        body = _inject_tokens(_clean(a.get("Body")) or f"{user.mention} just unlocked **{r.name}**.", user=user, role=r, emoji=emoji)
         lines.append(f"• {body}")
     emb.description = "\n".join(lines)
 
@@ -360,9 +376,9 @@ def build_group_embed(guild: discord.Guild, user: discord.Member, items: List[Tu
 def build_level_embed(guild: discord.Guild, user: discord.Member, row: dict) -> discord.Embed:
     emoji = resolve_emoji_text(guild, row.get("EmojiNameOrId"))
     role_for_tokens = user.top_role if user.top_role else user.guild.default_role
-    title = _inject_tokens(row.get("Title") or "Level up!", user=user, role=role_for_tokens, emoji=emoji)
-    body  = _inject_tokens(row.get("Body")  or "{user} leveled up!", user=user, role=role_for_tokens, emoji=emoji)
-    footer= _inject_tokens(row.get("Footer") or "", user=user, role=role_for_tokens, emoji=emoji)
+    title  = _inject_tokens(_clean(row.get("Title"))  or "Level up!", user=user, role=role_for_tokens, emoji=emoji)
+    body   = _inject_tokens(_clean(row.get("Body"))   or "{user} leveled up!", user=user, role=role_for_tokens, emoji=emoji)
+    footer = _inject_tokens(_clean(row.get("Footer")) or "", user=user, role=role_for_tokens, emoji=emoji)
     color = _color_from_hex(row.get("ColorHex")) or discord.Color.gold()
 
     emb = discord.Embed(title=title, description=body, color=color, timestamp=datetime.datetime.utcnow())
@@ -559,7 +575,7 @@ class RolePicker(BaseView):
     def __init__(self, owner_id: int, cat_key: str, att: Optional[discord.Attachment], batch_list: Optional[List[discord.Attachment]]):
         super().__init__(owner_id)
         self.cat_key = cat_key
-        self.att = att       # <-- fixed indentation
+        self.att = att
         self.batch = batch_list
         achs = [a for a in ACHIEVEMENTS.values() if a.get("category")==cat_key]
         opts = [discord.SelectOption(label=a["display_name"], value=a["key"]) for a in achs]
