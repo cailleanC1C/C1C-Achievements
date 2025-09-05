@@ -114,6 +114,11 @@ def load_config():
     global CFG, CATEGORIES, ACHIEVEMENTS, LEVELS, REASONS
     loaded = False
 
+log.info(f"CONFIG_SHEET_ID present={bool(sheet_id)} gspread_loaded={gspread is not None}")
+        except Exception as e:
+            log.warning(f"GSheet load failed: {e}", exc_info=True)
+
+
     if sid and gspread:
         try:
             creds = _svc_creds()
