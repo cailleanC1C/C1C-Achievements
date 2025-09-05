@@ -356,21 +356,42 @@ def build_achievement_embed(guild: discord.Guild, user: discord.Member, role: di
     body  = _inject_tokens(ach_row.get("Body")  or f"{user.mention} just unlocked **{role.name}**.", user=user, role=role, emoji=emoji)
     footer= _inject_tokens(ach_row.get("Footer") or "", user=user, role=role, emoji=emoji)
     color = _color_from_hex(ach_row.get("ColorHex")) or (role.color if getattr(role.color, "value", 0) else discord.Color.blurple())
+
     emb = discord.Embed(title=title, description=body, color=color, timestamp=datetime.datetime.utcnow())
+
     if CFG.get("embed_author_name"):
-        emb.set_author(name=CFG["embed_author_name"], icon_url=CFG.get("embed_author_icon") or discord.Embed.Empty)
-    if footer or CFG.get("embed_footer_text"):
-        emb.set_footer(text=footer or CFG["embed_footer_text"], icon_url=CFG.get("embed_footer_icon") or discord.Embed.Empty)
+        icon = CFG.get("embed_author_icon")
+        if icon:
+            emb.set_author(name=CFG["embed_author_name"], icon_url=icon)
+        else:
+            emb.set_author(name=CFG["embed_author_name"])
+
+    footer_text = footer or CFG.get("embed_footer_text")
+    if footer_text:
+        icon = CFG.get("embed_footer_icon")
+        if icon:
+            emb.set_footer(text=footer_text, icon_url=icon)
+        else:
+            emb.set_footer(text=footer_text)
+
     hero = _big_role_icon_url(role)
-    if hero: emb.set_image(url=hero)
+    if hero:
+        emb.set_image(url=hero)
     return emb
+
 
 def build_group_embed(guild: discord.Guild, user: discord.Member, items: List[Tuple[discord.Role, dict]]) -> discord.Embed:
     r0, a0 = items[0]
     color = _color_from_hex(a0.get("ColorHex")) or (r0.color if getattr(r0.color, "value", 0) else discord.Color.blurple())
     emb = discord.Embed(title=f"{user.display_name} unlocked {len(items)} achievements", color=color, timestamp=datetime.datetime.utcnow())
+
     if CFG.get("embed_author_name"):
-        emb.set_author(name=CFG["embed_author_name"], icon_url=CFG.get("embed_author_icon") or discord.Embed.Empty)
+        icon = CFG.get("embed_author_icon")
+        if icon:
+            emb.set_author(name=CFG["embed_author_name"], icon_url=icon)
+        else:
+            emb.set_author(name=CFG["embed_author_name"])
+
     lines = []
     for r, a in items:
         cat = _category_by_key(a.get("category") or "")
@@ -378,11 +399,20 @@ def build_group_embed(guild: discord.Guild, user: discord.Member, items: List[Tu
         body = _inject_tokens(a.get("Body") or f"{user.mention} just unlocked **{r.name}**.", user=user, role=r, emoji=emoji)
         lines.append(f"• {body}")
     emb.description = "\n".join(lines)
+
     hero = _big_role_icon_url(r0)
-    if hero: emb.set_image(url=hero)
-    if CFG.get("embed_footer_text"):
-        emb.set_footer(text=CFG["embed_footer_text"], icon_url=CFG.get("embed_footer_icon") or discord.Embed.Empty)
+    if hero:
+        emb.set_image(url=hero)
+
+    footer_text = CFG.get("embed_footer_text")
+    if footer_text:
+        icon = CFG.get("embed_footer_icon")
+        if icon:
+            emb.set_footer(text=footer_text, icon_url=icon)
+        else:
+            emb.set_footer(text=footer_text)
     return emb
+
 
 def build_level_embed(guild: discord.Guild, user: discord.Member, row: dict) -> discord.Embed:
     emoji = resolve_emoji_text(guild, row.get("EmojiNameOrId"))
@@ -391,12 +421,25 @@ def build_level_embed(guild: discord.Guild, user: discord.Member, row: dict) -> 
     body  = _inject_tokens(row.get("Body")  or "{user} leveled up!", user=user, role=role_for_tokens, emoji=emoji)
     footer= _inject_tokens(row.get("Footer") or "", user=user, role=role_for_tokens, emoji=emoji)
     color = _color_from_hex(row.get("ColorHex")) or discord.Color.gold()
+
     emb = discord.Embed(title=title, description=body, color=color, timestamp=datetime.datetime.utcnow())
+
     if CFG.get("embed_author_name"):
-        emb.set_author(name=CFG["embed_author_name"], icon_url=CFG.get("embed_author_icon") or discord.Embed.Empty)
-    if footer or CFG.get("embed_footer_text"):
-        emb.set_footer(text=footer or CFG["embed_footer_text"], icon_url=CFG.get("embed_footer_icon") or discord.Embed.Empty)
+        icon = CFG.get("embed_author_icon")
+        if icon:
+            emb.set_author(name=CFG["embed_author_name"], icon_url=icon)
+        else:
+            emb.set_author(name=CFG["embed_author_name"])
+
+    footer_text = footer or CFG.get("embed_footer_text")
+    if footer_text:
+        icon = CFG.get("embed_footer_icon")
+        if icon:
+            emb.set_footer(text=footer_text, icon_url=icon)
+        else:
+            emb.set_footer(text=footer_text)
     return emb
+
 
 # ---------- grouping buffer ----------
 GROUP: Dict[int, Dict[int, dict]] = {}
@@ -711,8 +754,12 @@ async def testconfig(ctx: commands.Context):
     gk_txt     = _fmt_role(ctx.guild, CFG.get("guardian_knights_role_id"))
     loaded_at = CONFIG_META["loaded_at"].strftime("%Y-%m-%d %H:%M:%S UTC") if CONFIG_META["loaded_at"] else "—"
     emb = discord.Embed(title="Current configuration", color=discord.Color.blurple())
-    if CFG.get("embed_author_name"):
-        emb.set_author(name=CFG["embed_author_name"], icon_url=CFG.get("embed_author_icon") or discord.Embed.Empty)
+if CFG.get("embed_author_name"):
+    icon = CFG.get("embed_author_icon")
+    if icon:
+        emb.set_author(name=CFG["embed_author_name"], icon_url=icon)
+    else:
+        emb.set_author(name=CFG["embed_author_name"])
     emb.add_field(name="Claims thread", value=thread_txt, inline=False)
     emb.add_field(name="Levels channel", value=levels_txt, inline=False)
     emb.add_field(name="Audit-log channel", value=audit_txt, inline=False)
