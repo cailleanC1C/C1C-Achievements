@@ -9,6 +9,7 @@
 #   CONFIG_SHEET_ID=...                # optional
 #   SERVICE_ACCOUNT_JSON=...           # optional (inline JSON or path to JSON)
 #   LOCAL_CONFIG_XLSX=/opt/render/project/src/C1C_Claims_Config_reminderStyle.xlsx   # optional
+#   CONFIG_AUTO_REFRESH_MINUTES=0      # optional (0 disables; e.g., 15 to auto-refresh every 15 min)
 #
 # Deps (requirements.txt):
 #   discord.py==2.3.2
@@ -21,6 +22,8 @@
 # Commands:
 #   !ping
 #   !testconfig
+#   !configstatus
+#   !reloadconfig
 #   !testach <key> [here|#channel|channel_id]
 #   !testlevel <query> [here|#channel|channel_id]
 #
@@ -94,6 +97,10 @@ ACHIEVEMENTS: Dict[str, dict] = {}
 LEVELS: List[dict] = []
 REASONS: Dict[str, str] = {}
 
+# meta about current config load
+CONFIG_META = {"source": "—", "loaded_at": None}
+_AUTO_REFRESH_TASK: Optional[asyncio.Task] = None
+
 # ---------- config loading ----------
 def _svc_creds():
     raw = os.getenv("SERVICE_ACCOUNT_JSON", "").strip()
@@ -126,13 +133,14 @@ def load_config():
     """Try Google Sheets first, then local Excel. Logs strong diagnostics for each step."""
     sid   = os.getenv("CONFIG_SHEET_ID", "").strip()
     local = os.getenv("LOCAL_CONFIG_XLSX", "").strip()
-    global CFG, CATEGORIES, ACHIEVEMENTS, LEVELS, REASONS
+    global CFG, CATEGORIES, ACHIEVEMENTS, LEVELS, REASONS, CONFIG_META
 
     # BOOT DIAGNOSTIC
     log.info(f"[boot] CONFIG_SHEET_ID set={bool(sid)} | LOCAL_CONFIG_XLSX set={bool(local)} | "
              f"gspread_loaded={gspread is not None} | pandas_loaded={pd is not None}")
 
     loaded = False
+    source = "—"
 
     # ---- Google Sheets ----
     if sid and gspread:
@@ -168,6 +176,7 @@ def load_config():
                 LEVELS = []
             REASONS = {r["code"]: r["message"] for r in sh.worksheet("Reasons").get_all_records()}
             loaded = True
+            source = "Google Sheets"
             log.info("Config loaded from Google Sheets")
         except Exception as e:
             log.warning(f"GSheet load failed: {e}", exc_info=True)
@@ -204,12 +213,16 @@ def load_config():
                 LEVELS = []
             REASONS = {r["code"]: r["message"] for r in pd.read_excel(xl, "Reasons").to_dict("records")}
             loaded = True
+            source = "Excel file"
             log.info("Config loaded from Excel")
         except Exception as e:
             log.error(f"Excel load failed: {e}", exc_info=True)
 
     if not loaded:
         raise RuntimeError("No config loaded. Set CONFIG_SHEET_ID (+SERVICE_ACCOUNT_JSON) or LOCAL_CONFIG_XLSX.")
+
+    CONFIG_META["source"] = source
+    CONFIG_META["loaded_at"] = datetime.datetime.utcnow()
 
 # ---------- helpers ----------
 def _is_image(att: discord.Attachment) -> bool:
@@ -269,9 +282,8 @@ def resolve_emoji_text(guild: discord.Guild, value: Optional[str], fallback: Opt
 def _inject_tokens(text: str, *, user: discord.Member, role: discord.Role, emoji: str) -> str:
     return (text or "").replace("{user}", user.mention).replace("{role}", role.name).replace("{emoji}", emoji)
 
-# --- NEW: safe embed sender + channel resolver for "here/#channel/id" ---
+# --- safe embed sender + channel resolver for "here/#channel/id" ---
 async def safe_send_embed(dest, embed: discord.Embed):
-    """Send an embed and fall back to text if embeds are blocked."""
     try:
         return await dest.send(embed=embed)
     except discord.Forbidden:
@@ -280,42 +292,32 @@ async def safe_send_embed(dest, embed: discord.Embed):
             "Ask an admin to enable that for me in this channel."
         )
     except Exception as e:
-        # still show *something* so tests don't look like they vanished
         return await dest.send(f"Couldn’t send embed: `{e}`")
 
 def _resolve_target_channel(ctx: commands.Context, where: Optional[str]):
-    """where can be: None, 'here', a #channel mention, or a numeric ID."""
     if not where:
-        # default to configured levels channel or current channel as fallback
         ch = ctx.guild.get_channel(CFG.get("levels_channel_id") or 0)
         return ch or ctx.channel
-
     w = where.strip().lower()
     if w == "here":
         return ctx.channel
-
-    # explicit channel mention in the message
     if ctx.message.channel_mentions:
         return ctx.message.channel_mentions[0]
-
-    # numeric id pasted
     digits = re.sub(r"[^\d]", "", where)
     if digits.isdigit():
         ch = ctx.guild.get_channel(int(digits))
         if ch:
             return ch
-
     return ctx.channel
 
-# --- NEW: pretty-format IDs to names/mentions for !testconfig ---
+# --- pretty-format IDs to names/mentions for !testconfig / !configstatus ---
 async def _fmt_chan_or_thread(guild: discord.Guild, chan_id: int | None) -> str:
-    """Return a human string like: #levels — Levels `1050...` (works for channels and threads)."""
     if not chan_id:
         return "—"
     obj = guild.get_channel(chan_id)
     if obj is None:
         try:
-            obj = await guild.fetch_channel(chan_id)  # also resolves threads not in cache
+            obj = await guild.fetch_channel(chan_id)
         except Exception:
             obj = None
     if obj is None:
@@ -340,7 +342,6 @@ def build_achievement_embed(guild: discord.Guild, user: discord.Member, role: di
     body  = _inject_tokens(ach_row.get("Body")  or f"{user.mention} just unlocked **{role.name}**.", user=user, role=role, emoji=emoji)
     footer= _inject_tokens(ach_row.get("Footer") or "", user=user, role=role, emoji=emoji)
     color = _color_from_hex(ach_row.get("ColorHex")) or (role.color if getattr(role.color, "value", 0) else discord.Color.blurple())
-
     emb = discord.Embed(title=title, description=body, color=color, timestamp=datetime.datetime.utcnow())
     if CFG.get("embed_author_name"):
         emb.set_author(name=CFG["embed_author_name"], icon_url=CFG.get("embed_author_icon") or discord.Embed.Empty)
@@ -678,54 +679,67 @@ async def process_claim(itx: discord.Interaction, ach_key: str, att: Optional[di
     else:
         await _one(att)
 
-# ---------- staff guard for test cmds ----------
+# ---------- staff guard ----------
 def _is_staff(member: discord.Member) -> bool:
     if member.guild_permissions.manage_guild:
         return True
     rid = CFG.get("guardian_knights_role_id")
     return bool(rid and any(r.id == rid for r in member.roles))
 
-# ---------- test commands ----------
+# ---------- test/admin commands ----------
 @bot.command(name="testconfig")
 async def testconfig(ctx: commands.Context):
     if not _is_staff(ctx.author):
         return await ctx.send("Staff only.")
-
     thread_txt = await _fmt_chan_or_thread(ctx.guild, CFG.get("public_claim_thread_id"))
     levels_txt = await _fmt_chan_or_thread(ctx.guild, CFG.get("levels_channel_id"))
     audit_txt  = await _fmt_chan_or_thread(ctx.guild, CFG.get("audit_log_channel_id"))
     gk_txt     = _fmt_role(ctx.guild, CFG.get("guardian_knights_role_id"))
-
+    loaded_at = CONFIG_META["loaded_at"].strftime("%Y-%m-%d %H:%M:%S UTC") if CONFIG_META["loaded_at"] else "—"
     emb = discord.Embed(title="Current configuration", color=discord.Color.blurple())
     if CFG.get("embed_author_name"):
         emb.set_author(name=CFG["embed_author_name"], icon_url=CFG.get("embed_author_icon") or discord.Embed.Empty)
-
     emb.add_field(name="Claims thread", value=thread_txt, inline=False)
     emb.add_field(name="Levels channel", value=levels_txt, inline=False)
     emb.add_field(name="Audit-log channel", value=audit_txt, inline=False)
     emb.add_field(name="Guardian Knights role", value=gk_txt, inline=False)
+    emb.add_field(name="Source", value=f"{CONFIG_META['source']} — {loaded_at}", inline=False)
     emb.add_field(
         name="Loaded rows",
         value=f"Achievements: **{len(ACHIEVEMENTS)}**\nCategories: **{len(CATEGORIES)}**\nLevels: **{len(LEVELS)}**",
         inline=False,
     )
-
     await safe_send_embed(ctx, emb)
+
+@bot.command(name="configstatus")
+async def configstatus(ctx: commands.Context):
+    if not _is_staff(ctx.author):
+        return await ctx.send("Staff only.")
+    loaded_at = CONFIG_META["loaded_at"].strftime("%Y-%m-%d %H:%M:%S UTC") if CONFIG_META["loaded_at"] else "—"
+    await ctx.send(f"Source: **{CONFIG_META['source']}** | Loaded: **{loaded_at}** | Ach={len(ACHIEVEMENTS)} Cat={len(CATEGORIES)} Lvls={len(LEVELS)}")
+
+@bot.command(name="reloadconfig")
+async def reloadconfig(ctx: commands.Context):
+    if not _is_staff(ctx.author):
+        return await ctx.send("Staff only.")
+    try:
+        load_config()
+        loaded_at = CONFIG_META["loaded_at"].strftime("%Y-%m-%d %H:%M:%S UTC")
+        await ctx.send(f"🔁 Reloaded from **{CONFIG_META['source']}** at **{loaded_at}**. Ach={len(ACHIEVEMENTS)} Cat={len(CATEGORIES)} Lvls={len(LEVELS)}")
+    except Exception as e:
+        await ctx.send(f"Reload failed: `{e}`")
 
 @bot.command(name="testach")
 async def testach(ctx: commands.Context, key: str, where: Optional[str] = None):
     if not _is_staff(ctx.author):
         return await ctx.send("Staff only.")
-
     ach = ACHIEVEMENTS.get(key)
     if not ach:
         close = [k for k in ACHIEVEMENTS.keys() if key.lower() in k.lower()]
         hint = ", ".join(close[:10]) or "no similar keys"
         return await ctx.send(f"Unknown achievement key `{key}`. Try: {hint}")
-
     role = _get_role_by_config(ctx.guild, ach) or ctx.guild.default_role
     emb = build_achievement_embed(ctx.guild, ctx.author, role, ach)
-
     target = _resolve_target_channel(ctx, where)
     await safe_send_embed(target, emb)
     if target.id != ctx.channel.id:
@@ -735,12 +749,9 @@ async def testach(ctx: commands.Context, key: str, where: Optional[str] = None):
 async def testlevel(ctx: commands.Context, *, args: str = ""):
     if not _is_staff(ctx.author):
         return await ctx.send("Staff only.")
-
-    # allow: !testlevel 80 here  OR  !testlevel Harbinger #levels
     parts = args.rsplit(" ", 1) if args else []
     query = parts[0] if parts else ""
     where = parts[1] if len(parts) == 2 else None
-
     row = None
     if query:
         q = query.lower()
@@ -751,7 +762,6 @@ async def testlevel(ctx: commands.Context, *, args: str = ""):
     row = row or (LEVELS[0] if LEVELS else None)
     if not row:
         return await ctx.send("No Levels rows loaded.")
-
     emb = build_level_embed(ctx.guild, ctx.author, row)
     target = _resolve_target_channel(ctx, where)
     await safe_send_embed(target, emb)
@@ -797,7 +807,16 @@ async def on_message(msg: discord.Message):
         m = await msg.reply(f"**I found {len(images)} screenshots. What do you want to do?**", view=view, mention_author=False)
         view.message = m
 
-# ---------- startup ----------
+# ---------- startup & optional auto-refresh ----------
+async def _auto_refresh_loop(minutes: int):
+    while True:
+        try:
+            await asyncio.sleep(minutes * 60)
+            load_config()
+            log.info(f"Auto-refreshed config from {CONFIG_META['source']} at {CONFIG_META['loaded_at']}")
+        except Exception:
+            log.exception("Auto-refresh failed")
+
 @bot.event
 async def on_ready():
     log.info(f"Logged in as {bot.user} ({bot.user.id})")
@@ -807,6 +826,14 @@ async def on_ready():
     except Exception as e:
         log.error(f"Config error: {e}")
         await bot.close()
+        return
+
+    # start background auto-refresh if enabled
+    global _AUTO_REFRESH_TASK
+    mins = int(os.getenv("CONFIG_AUTO_REFRESH_MINUTES", "0") or "0")
+    if mins > 0 and _AUTO_REFRESH_TASK is None:
+        _AUTO_REFRESH_TASK = asyncio.create_task(_auto_refresh_loop(mins))
+        log.info(f"Auto-refresh enabled: every {mins} minutes")
 
 if __name__ == "__main__":
     token = os.getenv("DISCORD_BOT_TOKEN") or os.getenv("DISCORD_TOKEN")
