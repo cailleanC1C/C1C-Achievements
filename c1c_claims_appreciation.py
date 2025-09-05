@@ -21,9 +21,11 @@
 #
 # Commands:
 #   !ping
-#   !testconfig
-#   !configstatus
-#   !reloadconfig
+#   !testconfig         (pretty names + mentions + IDs)
+#   !configstatus       (source + last loaded)
+#   !reloadconfig       (re-fetch from sheet/xlsx)
+#   !listach [filter]   (show loaded achievement keys)
+#   !findach <text>     (search achievement rows)
 #   !testach <key> [here|#channel|channel_id]
 #   !testlevel <query> [here|#channel|channel_id]
 #
@@ -31,7 +33,7 @@
 #   Proof thread → [Use first / Choose image / Use all / Cancel] → Category → Role → AUTO_GRANT or GK review
 #   Big role icon pulled from the Discord role's icon, embeds use Title/Body/Footer from sheet, tokens {user}/{role}/{emoji}
 
-import os, re, json, asyncio, logging, datetime, threading
+import os, re, json, asyncio, logging, datetime, threading, traceback
 from typing import Optional, List, Dict, Tuple
 from functools import partial
 
@@ -729,6 +731,33 @@ async def reloadconfig(ctx: commands.Context):
     except Exception as e:
         await ctx.send(f"Reload failed: `{e}`")
 
+@bot.command(name="listach")
+async def listach(ctx: commands.Context, filter_text: str = ""):
+    if not _is_staff(ctx.author):
+        return await ctx.send("Staff only.")
+    keys = sorted(ACHIEVEMENTS.keys())
+    if filter_text:
+        f = filter_text.lower()
+        keys = [k for k in keys if f in k.lower() or f in (ACHIEVEMENTS[k].get("display_name","").lower())]
+    if not keys:
+        return await ctx.send("No achievements match.")
+    chunk = ", ".join(keys[:60])
+    await ctx.send(f"**Loaded achievements ({len(keys)}):** {chunk}{' …' if len(keys) > 60 else ''}")
+
+@bot.command(name="findach")
+async def findach(ctx: commands.Context, *, text: str):
+    if not _is_staff(ctx.author):
+        return await ctx.send("Staff only.")
+    t = text.lower()
+    hits = []
+    for k, r in ACHIEVEMENTS.items():
+        hay = " ".join([(r.get("key","") or ""), (r.get("display_name","") or ""), (r.get("category","") or ""), (r.get("Title","") or ""), (r.get("Body","") or "")]).lower()
+        if t in hay:
+            hits.append(f"`{k}` — {r.get('display_name','')}")
+    if not hits:
+        return await ctx.send("No matches.")
+    await ctx.send("\n".join(hits[:20]))
+
 @bot.command(name="testach")
 async def testach(ctx: commands.Context, key: str, where: Optional[str] = None):
     if not _is_staff(ctx.author):
@@ -772,6 +801,20 @@ async def testlevel(ctx: commands.Context, *, args: str = ""):
 async def ping(ctx: commands.Context):
     await ctx.send("✅ Live and listening.")
 
+# ---------- command error reporter (so failures aren’t silent) ----------
+@bot.event
+async def on_command_error(ctx: commands.Context, error: Exception):
+    if isinstance(error, commands.CommandNotFound):
+        return
+    # Show readable error in-channel
+    try:
+        await ctx.send(f"⚠️ **{type(error).__name__}**: `{error}`")
+    except Exception:
+        pass
+    # Log full traceback to Render
+    tb = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    log.error("Command error:\n%s", tb)
+
 # ---------- message listener (levels & claims) ----------
 @bot.event
 async def on_message(msg: discord.Message):
@@ -793,7 +836,7 @@ async def on_message(msg: discord.Message):
         pass
 
     # Claims only in the configured thread
-    if not CFG.get("public_claim_thread_id") or msg.channel.id != CFG["public_claim_thread_id"]:
+    if not CFG.get("public_claim_thread_id") or msg.channel.id != CFG.get("public_claim_thread_id"):
         return
     images = [a for a in msg.attachments if _is_image(a)]
     if not images:
