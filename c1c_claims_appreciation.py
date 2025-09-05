@@ -4,6 +4,7 @@
 import os, re, json, asyncio, logging, datetime, threading, traceback
 from typing import Optional, List, Dict, Tuple
 from functools import partial
+from urllib.parse import urlparse
 
 import discord
 from discord.ext import commands
@@ -98,6 +99,19 @@ def _color_from_hex(hex_str: Optional[str]) -> Optional[discord.Color]:
         return discord.Color(int(s, 16))
     except Exception:
         return None
+
+def _safe_icon(icon_val: Optional[str]) -> Optional[str]:
+    """Return a valid http(s) URL or None."""
+    s = _to_str(icon_val).strip()
+    if not s:
+        return None
+    try:
+        u = urlparse(s)
+        if u.scheme in ("http", "https") and u.netloc:
+            return s
+    except Exception:
+        pass
+    return None
 
 def load_config():
     sid   = os.getenv("CONFIG_SHEET_ID", "").strip()
@@ -287,7 +301,7 @@ def _fmt_role(guild: discord.Guild, role_id: int | None) -> str:
         return f"(unknown role) `{role_id}`"
     return f"{r.mention} — **{r.name}** `{role_id}`"
 
-# ---------------- embed builders (no Embed.Empty usage) ----------------
+# ---------------- embed builders (safe icon URLs) ----------------
 def build_achievement_embed(guild: discord.Guild, user: discord.Member, role: discord.Role, ach_row: dict) -> discord.Embed:
     cat = _category_by_key(ach_row.get("category") or "")
     emoji = resolve_emoji_text(guild, ach_row.get("EmojiNameOrId"), fallback=(cat or {}).get("emoji"))
@@ -299,19 +313,15 @@ def build_achievement_embed(guild: discord.Guild, user: discord.Member, role: di
     emb = discord.Embed(title=title, description=body, color=color, timestamp=datetime.datetime.utcnow())
 
     if CFG.get("embed_author_name"):
-        icon = CFG.get("embed_author_icon")
-        if icon:
-            emb.set_author(name=CFG["embed_author_name"], icon_url=icon)
-        else:
-            emb.set_author(name=CFG["embed_author_name"])
+        icon = _safe_icon(CFG.get("embed_author_icon"))
+        if icon: emb.set_author(name=CFG["embed_author_name"], icon_url=icon)
+        else:    emb.set_author(name=CFG["embed_author_name"])
 
     footer_text = footer or CFG.get("embed_footer_text")
     if footer_text:
-        icon = CFG.get("embed_footer_icon")
-        if icon:
-            emb.set_footer(text=footer_text, icon_url=icon)
-        else:
-            emb.set_footer(text=footer_text)
+        ficon = _safe_icon(CFG.get("embed_footer_icon"))
+        if ficon: emb.set_footer(text=footer_text, icon_url=ficon)
+        else:     emb.set_footer(text=footer_text)
 
     hero = _big_role_icon_url(role)
     if hero:
@@ -324,11 +334,9 @@ def build_group_embed(guild: discord.Guild, user: discord.Member, items: List[Tu
     emb = discord.Embed(title=f"{user.display_name} unlocked {len(items)} achievements", color=color, timestamp=datetime.datetime.utcnow())
 
     if CFG.get("embed_author_name"):
-        icon = CFG.get("embed_author_icon")
-        if icon:
-            emb.set_author(name=CFG["embed_author_name"], icon_url=icon)
-        else:
-            emb.set_author(name=CFG["embed_author_name"])
+        icon = _safe_icon(CFG.get("embed_author_icon"))
+        if icon: emb.set_author(name=CFG["embed_author_name"], icon_url=icon)
+        else:    emb.set_author(name=CFG["embed_author_name"])
 
     lines = []
     for r, a in items:
@@ -344,11 +352,9 @@ def build_group_embed(guild: discord.Guild, user: discord.Member, items: List[Tu
 
     footer_text = CFG.get("embed_footer_text")
     if footer_text:
-        icon = CFG.get("embed_footer_icon")
-        if icon:
-            emb.set_footer(text=footer_text, icon_url=icon)
-        else:
-            emb.set_footer(text=footer_text)
+        ficon = _safe_icon(CFG.get("embed_footer_icon"))
+        if ficon: emb.set_footer(text=footer_text, icon_url=ficon)
+        else:     emb.set_footer(text=footer_text)
     return emb
 
 def build_level_embed(guild: discord.Guild, user: discord.Member, row: dict) -> discord.Embed:
@@ -362,19 +368,15 @@ def build_level_embed(guild: discord.Guild, user: discord.Member, row: dict) -> 
     emb = discord.Embed(title=title, description=body, color=color, timestamp=datetime.datetime.utcnow())
 
     if CFG.get("embed_author_name"):
-        icon = CFG.get("embed_author_icon")
-        if icon:
-            emb.set_author(name=CFG["embed_author_name"], icon_url=icon)
-        else:
-            emb.set_author(name=CFG["embed_author_name"])
+        icon = _safe_icon(CFG.get("embed_author_icon"))
+        if icon: emb.set_author(name=CFG["embed_author_name"], icon_url=icon)
+        else:    emb.set_author(name=CFG["embed_author_name"])
 
     footer_text = footer or CFG.get("embed_footer_text")
     if footer_text:
-        icon = CFG.get("embed_footer_icon")
-        if icon:
-            emb.set_footer(text=footer_text, icon_url=icon)
-        else:
-            emb.set_footer(text=footer_text)
+        ficon = _safe_icon(CFG.get("embed_footer_icon"))
+        if ficon: emb.set_footer(text=footer_text, icon_url=ficon)
+        else:     emb.set_footer(text=footer_text)
     return emb
 
 # ---------------- grouping buffer ----------------
@@ -557,7 +559,7 @@ class RolePicker(BaseView):
     def __init__(self, owner_id: int, cat_key: str, att: Optional[discord.Attachment], batch_list: Optional[List[discord.Attachment]]):
         super().__init__(owner_id)
         self.cat_key = cat_key
-        self.att = att
+               self.att = att
         self.batch = batch_list
         achs = [a for a in ACHIEVEMENTS.values() if a.get("category")==cat_key]
         opts = [discord.SelectOption(label=a["display_name"], value=a["key"]) for a in achs]
@@ -693,7 +695,7 @@ async def testconfig(cmdx: commands.Context):
 
     emb = discord.Embed(title="Current configuration", color=discord.Color.blurple())
     if CFG.get("embed_author_name"):
-        icon = CFG.get("embed_author_icon")
+        icon = _safe_icon(CFG.get("embed_author_icon"))
         if icon: emb.set_author(name=CFG["embed_author_name"], icon_url=icon)
         else:    emb.set_author(name=CFG["embed_author_name"])
     emb.add_field(name="Claims thread", value=thread_txt, inline=False)
