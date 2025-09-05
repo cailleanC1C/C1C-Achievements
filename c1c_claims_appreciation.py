@@ -559,7 +559,7 @@ class RolePicker(BaseView):
     def __init__(self, owner_id: int, cat_key: str, att: Optional[discord.Attachment], batch_list: Optional[List[discord.Attachment]]):
         super().__init__(owner_id)
         self.cat_key = cat_key
-               self.att = att
+        self.att = att       # <-- fixed indentation
         self.batch = batch_list
         achs = [a for a in ACHIEVEMENTS.values() if a.get("category")==cat_key]
         opts = [discord.SelectOption(label=a["display_name"], value=a["key"]) for a in achs]
