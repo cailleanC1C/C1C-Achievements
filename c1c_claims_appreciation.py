@@ -19,7 +19,10 @@
 #   google-auth==2.31.0
 #
 # Commands:
-#   !ping, !testconfig, !testach <key>, !testlevel <query>, !testemoji <value>
+#   !ping
+#   !testconfig
+#   !testach <key> [here|#channel|channel_id]
+#   !testlevel <query> [here|#channel|channel_id]
 #
 # Flow:
 #   Proof thread → [Use first / Choose image / Use all / Cancel] → Category → Role → AUTO_GRANT or GK review
@@ -265,6 +268,44 @@ def resolve_emoji_text(guild: discord.Guild, value: Optional[str], fallback: Opt
 
 def _inject_tokens(text: str, *, user: discord.Member, role: discord.Role, emoji: str) -> str:
     return (text or "").replace("{user}", user.mention).replace("{role}", role.name).replace("{emoji}", emoji)
+
+# --- NEW: safe embed sender + channel resolver for "here/#channel/id" ---
+async def safe_send_embed(dest: discord.abc.MessageableChannel, embed: discord.Embed):
+    """Send an embed and fall back to text if embeds are blocked."""
+    try:
+        return await dest.send(embed=embed)
+    except discord.Forbidden:
+        return await dest.send(
+            "I tried to send an embed here but I'm missing **Embed Links**.\n"
+            "Ask an admin to enable that for me in this channel."
+        )
+    except Exception as e:
+        # still show *something* so tests don't look like they vanished
+        return await dest.send(f"Couldn’t send embed: `{e}`")
+
+def _resolve_target_channel(ctx: commands.Context, where: Optional[str]):
+    """where can be: None, 'here', a #channel mention, or a numeric ID."""
+    if not where:
+        # default to configured levels channel or current channel as fallback
+        ch = ctx.guild.get_channel(CFG.get("levels_channel_id") or 0)
+        return ch or ctx.channel
+
+    w = where.strip().lower()
+    if w == "here":
+        return ctx.channel
+
+    # explicit channel mention in the message
+    if ctx.message.channel_mentions:
+        return ctx.message.channel_mentions[0]
+
+    # numeric id pasted
+    digits = re.sub(r"[^\d]", "", where)
+    if digits.isdigit():
+        ch = ctx.guild.get_channel(int(digits))
+        if ch:
+            return ch
+
+    return ctx.channel
 
 # ---------- embed builders ----------
 def build_achievement_embed(guild: discord.Guild, user: discord.Member, role: discord.Role, ach_row: dict) -> discord.Embed:
@@ -636,39 +677,50 @@ async def testconfig(ctx: commands.Context):
     await ctx.send("```\n" + "\n".join(lines) + "\n```")
 
 @bot.command(name="testach")
-async def testach(ctx: commands.Context, key: str):
+async def testach(ctx: commands.Context, key: str, where: Optional[str] = None):
     if not _is_staff(ctx.author):
         return await ctx.send("Staff only.")
+
     ach = ACHIEVEMENTS.get(key)
     if not ach:
-        sample = ", ".join(list(ACHIEVEMENTS.keys())[:10])
-        return await ctx.send(f"Unknown key. Try one of: `{sample} …`")
+        close = [k for k in ACHIEVEMENTS.keys() if key.lower() in k.lower()]
+        hint = ", ".join(close[:10]) or "no similar keys"
+        return await ctx.send(f"Unknown achievement key `{key}`. Try: {hint}")
+
     role = _get_role_by_config(ctx.guild, ach) or ctx.guild.default_role
     emb = build_achievement_embed(ctx.guild, ctx.author, role, ach)
-    await ctx.send(embed=emb)
+
+    target = _resolve_target_channel(ctx, where)
+    await safe_send_embed(target, emb)
+    if target.id != ctx.channel.id:
+        await ctx.reply(f"Preview sent to {target.mention}", mention_author=False)
 
 @bot.command(name="testlevel")
-async def testlevel(ctx: commands.Context, *, query: str = ""):
+async def testlevel(ctx: commands.Context, *, args: str = ""):
     if not _is_staff(ctx.author):
         return await ctx.send("Staff only.")
+
+    # allow: !testlevel 80 here  OR  !testlevel Harbinger #levels
+    parts = args.rsplit(" ", 1) if args else []
+    query = parts[0] if parts else ""
+    where = parts[1] if len(parts) == 2 else None
+
     row = None
     if query:
         q = query.lower()
         for r in LEVELS:
-            if q in (r.get("level_key","").lower() + " " + r.get("Title","").lower() + " " + r.get("Body","").lower()):
+            hay = (r.get("level_key","") + " " + r.get("Title","") + " " + r.get("Body","")).lower()
+            if q in hay:
                 row = r; break
     row = row or (LEVELS[0] if LEVELS else None)
     if not row:
         return await ctx.send("No Levels rows loaded.")
-    emb = build_level_embed(ctx.guild, ctx.author, row)
-    await ctx.send(embed=emb)
 
-@bot.command(name="testemoji")
-async def testemoji(ctx: commands.Context, *, value: str):
-    if not _is_staff(ctx.author):
-        return await ctx.send("Staff only.")
-    txt = resolve_emoji_text(ctx.guild, value)
-    await ctx.send(f"Resolved: {txt or '(empty)'}")
+    emb = build_level_embed(ctx.guild, ctx.author, row)
+    target = _resolve_target_channel(ctx, where)
+    await safe_send_embed(target, emb)
+    if target.id != ctx.channel.id:
+        await ctx.reply(f"Preview sent to {target.mention}", mention_author=False)
 
 @bot.command(name="ping")
 async def ping(ctx: commands.Context):
