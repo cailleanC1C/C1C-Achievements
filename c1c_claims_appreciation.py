@@ -67,6 +67,9 @@ REASONS: Dict[str, str] = {}
 CONFIG_META = {"source": "—", "loaded_at": None}
 _AUTO_REFRESH_TASK: Optional[asyncio.Task] = None
 
+# ---- claim lifecycle: first prompt message id -> "open" | "canceled" | "expired" | "closed"
+CLAIM_STATE: Dict[int, str] = {}
+
 # ---------------- config loading ----------------
 def _svc_creds():
     raw = os.getenv("SERVICE_ACCOUNT_JSON", "").strip()
@@ -101,7 +104,6 @@ def _color_from_hex(hex_str: Optional[str]) -> Optional[discord.Color]:
         return None
 
 def _safe_icon(icon_val: Optional[str]) -> Optional[str]:
-    """Return a valid http(s) URL or None."""
     s = _to_str(icon_val).strip()
     if not s:
         return None
@@ -114,7 +116,6 @@ def _safe_icon(icon_val: Optional[str]) -> Optional[str]:
     return None
 
 def _opt(row: dict, key: str, default=None):
-    """Preserve blank cell as None; otherwise return value or default."""
     if key in row:
         val = row.get(key)
         s = _to_str(val).strip()
@@ -122,7 +123,6 @@ def _opt(row: dict, key: str, default=None):
     return default
 
 def _clean(text: Optional[str]) -> str:
-    """Turn literal '\n' into real newlines and normalize line endings."""
     s = _to_str(text)
     if not s:
         return ""
@@ -140,7 +140,6 @@ def load_config():
     loaded = False
     source = "—"
 
-    # Google Sheets
     if sid and gspread:
         try:
             creds = _svc_creds()
@@ -179,7 +178,6 @@ def load_config():
         except Exception as e:
             log.warning(f"GSheet load failed: {e}", exc_info=True)
 
-    # Local Excel
     if not loaded and local and pd:
         try:
             if not os.path.isabs(local):
@@ -268,6 +266,16 @@ def resolve_emoji_text(guild: discord.Guild, value: Optional[str], fallback: Opt
 def _inject_tokens(text: str, *, user: discord.Member, role: discord.Role, emoji: str) -> str:
     return (text or "").replace("{user}", user.mention).replace("{role}", role.name).replace("{emoji}", emoji)
 
+def _httpish(url: Optional[str]) -> Optional[str]:
+    u = _to_str(url).strip()
+    if u.startswith("http://") or u.startswith("https://"):
+        return u
+    return None
+
+def resolve_hero_image(guild: discord.Guild, role: discord.Role, ach_row: dict) -> Optional[str]:
+    cat = _category_by_key(ach_row.get("category") or "")
+    return _httpish(ach_row.get("HeroImageURL")) or _httpish((cat or {}).get("hero_image_url")) or _big_role_icon_url(role)
+
 async def safe_send_embed(dest, embed: discord.Embed):
     try:
         return await dest.send(embed=embed)
@@ -317,7 +325,7 @@ def _fmt_role(guild: discord.Guild, role_id: int | None) -> str:
         return f"(unknown role) `{role_id}`"
     return f"{r.mention} — **{r.name}** `{role_id}`"
 
-# ---------------- embed builders (safe icon URLs + \n cleanup) ----------------
+# ---------------- embed builders ----------------
 def build_achievement_embed(guild: discord.Guild, user: discord.Member, role: discord.Role, ach_row: dict) -> discord.Embed:
     cat = _category_by_key(ach_row.get("category") or "")
     emoji = resolve_emoji_text(guild, ach_row.get("EmojiNameOrId"), fallback=(cat or {}).get("emoji"))
@@ -339,9 +347,9 @@ def build_achievement_embed(guild: discord.Guild, user: discord.Member, role: di
         if ficon: emb.set_footer(text=footer_text, icon_url=ficon)
         else:     emb.set_footer(text=footer_text)
 
-    hero = _big_role_icon_url(role)
+    hero = resolve_hero_image(guild, role, ach_row)
     if hero:
-        emb.set_image(url=hero)
+        emb.set_thumbnail(url=hero)  # top-right
     return emb
 
 def build_group_embed(guild: discord.Guild, user: discord.Member, items: List[Tuple[discord.Role, dict]]) -> discord.Embed:
@@ -362,10 +370,9 @@ def build_group_embed(guild: discord.Guild, user: discord.Member, items: List[Tu
         lines.append(f"• {body}")
     emb.description = "\n".join(lines)
 
-    hero = _big_role_icon_url(r0)
+    hero = resolve_hero_image(guild, r0, a0)
     if hero:
-        emb.set_image(url=hero)
-
+        emb.set_thumbnail(url=hero)  # top-right
     footer_text = CFG.get("embed_footer_text")
     if footer_text:
         ficon = _safe_icon(CFG.get("embed_footer_icon"))
@@ -431,10 +438,11 @@ def _buffer_item(guild: discord.Guild, user_id: int, role: discord.Role, ach: di
 
 # ---------------- GK Review views ----------------
 class TryAgainView(discord.ui.View):
-    def __init__(self, owner_id: int, att: Optional[discord.Attachment]):
+    def __init__(self, owner_id: int, att: Optional[discord.Attachment], claim_id: int):
         super().__init__(timeout=600)
         self.owner_id = owner_id
         self.att = att
+        self.claim_id = claim_id
 
     async def interaction_check(self, itx: discord.Interaction) -> bool:
         if itx.user.id != self.owner_id:
@@ -444,14 +452,15 @@ class TryAgainView(discord.ui.View):
 
     @discord.ui.button(label="Try again", style=discord.ButtonStyle.primary)
     async def try_again(self, itx: discord.Interaction, _btn: discord.ui.Button):
-        await show_category_picker(itx, self.att)
+        await show_category_picker(itx, self.att, claim_id=self.claim_id)
 
 class GKReview(discord.ui.View):
-    def __init__(self, claimant_id: int, ach_key: str, att: Optional[discord.Attachment]):
+    def __init__(self, claimant_id: int, ach_key: str, att: Optional[discord.Attachment], claim_id: int):
         super().__init__(timeout=1800)
         self.claimant_id = claimant_id
         self.ach_key = ach_key
         self.att = att
+        self.claim_id = claim_id
 
     async def _only_gk(self, itx: discord.Interaction) -> bool:
         rid = CFG.get("guardian_knights_role_id")
@@ -461,18 +470,37 @@ class GKReview(discord.ui.View):
             return False
         return True
 
+    async def _only_claimant(self, itx: discord.Interaction) -> bool:
+        if itx.user.id != self.claimant_id:
+            await itx.response.send_message("Only the claimant can cancel this request.", ephemeral=True)
+            return False
+        return True
+
+    def _disable_all(self):
+        for c in self.children:
+            c.disabled = True
+
     @discord.ui.button(label="Approve", style=discord.ButtonStyle.success)
     async def approve(self, itx: discord.Interaction, _btn: discord.ui.Button):
         if not await self._only_gk(itx): return
         await itx.response.defer()
         await finalize_grant(itx.guild, self.claimant_id, self.ach_key)
-        await itx.message.edit(content="**Approved.**", view=None)
+        try:
+            await itx.message.edit(content="**Approved.**", view=None)
+        except Exception:
+            pass
 
     @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger)
     async def deny(self, itx: discord.Interaction, _btn: discord.ui.Button):
         if not await self._only_gk(itx): return
         reason = REASONS.get("NEED_BANNER", "Proof unclear. Please include the full result banner.")
-        await itx.message.edit(content=f"**Not approved.** Reason: **{reason}**\nPost a clearer screenshot and hit **Try Again**.", view=TryAgainView(self.claimant_id, self.att))
+        try:
+            await itx.message.edit(
+                content=f"**Not approved.** Reason: **{reason}**\nPost a clearer screenshot and hit **Try Again**.",
+                view=TryAgainView(self.claimant_id, self.att, claim_id=self.claim_id)
+            )
+        except Exception:
+            pass
 
     @discord.ui.button(label="Grant different role…", style=discord.ButtonStyle.secondary)
     async def grant_other(self, itx: discord.Interaction, _btn: discord.ui.Button):
@@ -480,26 +508,58 @@ class GKReview(discord.ui.View):
         opts = [discord.SelectOption(label=a["display_name"], value=a["key"]) for a in ACHIEVEMENTS.values()]
         v = discord.ui.View(timeout=600)
         sel = discord.ui.Select(placeholder="Pick a role to grant instead…", options=opts)
+
         async def _on_pick(sel_itx: discord.Interaction):
             if not await self._only_gk(sel_itx): return
             key = sel_itx.data["values"][0]
             await sel_itx.response.defer()
             await finalize_grant(sel_itx.guild, self.claimant_id, key)
-            await itx.message.edit(content="**Approved with different role.**", view=None)
+            try:
+                await itx.message.edit(content="**Approved with different role.**", view=None)
+            except Exception:
+                pass
+
         sel.callback = _on_pick
         v.add_item(sel)
         await itx.response.send_message("Choose replacement role:", view=v, ephemeral=True)
 
-# ---------------- Pickers ----------------
+    @discord.ui.button(label="Cancel request", style=discord.ButtonStyle.danger)
+    async def cancel_req(self, itx: discord.Interaction, _btn: discord.ui.Button):
+        if not await self._only_claimant(itx): return
+        await itx.response.defer()
+        try:
+            await itx.message.delete()
+        except Exception:
+            self._disable_all()
+            try:
+                await itx.message.edit(
+                    content=f"**Claim canceled by {itx.user.mention}.** No action needed.",
+                    view=self
+                )
+            except Exception:
+                pass
+
+# ---------------- Pickers with claim-state awareness ----------------
 class BaseView(discord.ui.View):
-    def __init__(self, owner_id: int, timeout=600):
+    def __init__(self, owner_id: int, claim_id: int, timeout=600, announce: bool = False):
         super().__init__(timeout=timeout)
         self.owner_id = owner_id
+        self.claim_id = claim_id     # id of the FIRST prompt message
+        self.announce = announce     # only the first prompt sets this True
         self.message: Optional[discord.Message] = None
 
     async def on_timeout(self):
+        # only first prompt may announce, and only if claim is still open
+        if not self.announce:
+            return
+        if CLAIM_STATE.get(self.claim_id) != "open":
+            return
+        CLAIM_STATE[self.claim_id] = "expired"
         try:
-            await self.message.channel.send(f"**Claim expired for <@{self.owner_id}>.** No action needed.")
+            if self.message:
+                await self.message.channel.send(
+                    f"**Claim expired for <@{self.owner_id}>.** No action needed."
+                )
         except Exception:
             pass
 
@@ -510,24 +570,24 @@ class BaseView(discord.ui.View):
         return True
 
 class MultiImageChoice(BaseView):
-    def __init__(self, owner_id: int, atts: List[discord.Attachment]):
-        super().__init__(owner_id)
+    def __init__(self, owner_id: int, atts: List[discord.Attachment], claim_id: int, announce: bool = False):
+        super().__init__(owner_id, claim_id, announce=announce)
         self.atts = [a for a in atts if _is_image(a)]
 
     @discord.ui.button(label="Use first", style=discord.ButtonStyle.primary)
     async def use_first(self, itx: discord.Interaction, _btn: discord.ui.Button):
-        await show_category_picker(itx, self.atts[0])
+        await show_category_picker(itx, self.atts[0], claim_id=self.claim_id)
 
     @discord.ui.button(label="Choose image", style=discord.ButtonStyle.secondary)
     async def choose_image(self, itx: discord.Interaction, _btn: discord.ui.Button):
-        view = ImageSelect(self.owner_id, self.atts)
+        view = ImageSelect(self.owner_id, self.atts, self.claim_id)
         await itx.response.edit_message(content="Pick one screenshot:", view=view)
         view.message = await itx.edit_original_response()
 
     @discord.ui.button(label="Use all", style=discord.ButtonStyle.success)
     async def use_all(self, itx: discord.Interaction, _btn: discord.ui.Button):
         await itx.response.edit_message(content=f"Apply one achievement to all **{len(self.atts)}** screenshots from this post. Pick the achievement once.", view=None)
-        await show_category_picker(itx, None, batch_list=self.atts)
+        await show_category_picker(itx, None, batch_list=self.atts, claim_id=self.claim_id)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
     async def cancel(self, itx: discord.Interaction, _btn: discord.ui.Button):
@@ -535,11 +595,13 @@ class MultiImageChoice(BaseView):
             await itx.message.delete()
         except Exception:
             pass
+        CLAIM_STATE[self.claim_id] = "canceled"
+        self.stop()
         await itx.channel.send(f"**Claim canceled by {itx.user.mention}.** No action needed.")
 
 class ImageSelect(BaseView):
-    def __init__(self, owner_id: int, atts: List[discord.Attachment]):
-        super().__init__(owner_id)
+    def __init__(self, owner_id: int, atts: List[discord.Attachment], claim_id: int, announce: bool = False):
+        super().__init__(owner_id, claim_id, announce=announce)
         self.atts = atts
         opts = [discord.SelectOption(label=f"#{i} – {a.filename}", value=str(i-1)) for i,a in enumerate(atts, start=1)]
         sel = discord.ui.Select(placeholder="Choose a screenshot…", options=opts)
@@ -548,11 +610,12 @@ class ImageSelect(BaseView):
 
     async def _on_pick(self, itx: discord.Interaction):
         idx = int(itx.data["values"][0])
-        await show_category_picker(itx, self.atts[idx])
+        await show_category_picker(itx, self.atts[idx], claim_id=self.claim_id)
 
 class CategoryPicker(BaseView):
-    def __init__(self, owner_id: int, att: Optional[discord.Attachment], batch_list: Optional[List[discord.Attachment]]=None):
-        super().__init__(owner_id)
+    def __init__(self, owner_id: int, att: Optional[discord.Attachment],
+                 batch_list: Optional[List[discord.Attachment]], claim_id: int, announce: bool = False):
+        super().__init__(owner_id, claim_id, announce=announce)
         self.att = att
         self.batch = batch_list
         for c in [c for c in CATEGORIES if _truthy(c.get("enabled", True))]:
@@ -566,14 +629,17 @@ class CategoryPicker(BaseView):
     async def _cancel(self, itx: discord.Interaction):
         try: await itx.message.delete()
         except Exception: pass
+        CLAIM_STATE[self.claim_id] = "canceled"
+        self.stop()
         await itx.channel.send(f"**Claim canceled by {itx.user.mention}.** No action needed.")
 
     async def _pick_cat(self, itx: discord.Interaction, cat_key: str):
-        await show_role_picker(itx, cat_key, self.att, self.batch)
+        await show_role_picker(itx, cat_key, self.att, self.batch, claim_id=self.claim_id)
 
 class RolePicker(BaseView):
-    def __init__(self, owner_id: int, cat_key: str, att: Optional[discord.Attachment], batch_list: Optional[List[discord.Attachment]]):
-        super().__init__(owner_id)
+    def __init__(self, owner_id: int, cat_key: str, att: Optional[discord.Attachment],
+                 batch_list: Optional[List[discord.Attachment]], claim_id: int, announce: bool = False):
+        super().__init__(owner_id, claim_id, announce=announce)
         self.cat_key = cat_key
         self.att = att
         self.batch = batch_list
@@ -590,21 +656,24 @@ class RolePicker(BaseView):
         self.add_item(cancel)
 
     async def _back(self, itx: discord.Interaction):
-        await show_category_picker(itx, self.att, self.batch)
+        await show_category_picker(itx, self.att, self.batch, claim_id=self.claim_id)
 
     async def _cancel(self, itx: discord.Interaction):
         try: await itx.message.delete()
         except Exception: pass
+        CLAIM_STATE[self.claim_id] = "canceled"
+        self.stop()
         await itx.channel.send(f"**Claim canceled by {itx.user.mention}.** No action needed.")
 
     async def _on_pick(self, itx: discord.Interaction):
         await itx.response.defer()
         key = itx.data["values"][0]
-        await process_claim(itx, key, self.att, self.batch)
+        await process_claim(itx, key, self.att, self.batch, claim_id=self.claim_id)
 
 # ---------------- Flow helpers ----------------
-async def show_category_picker(itx: discord.Interaction, attachment: Optional[discord.Attachment], batch_list: Optional[List[discord.Attachment]] = None):
-    v = CategoryPicker(itx.user.id, attachment, batch_list=batch_list)
+async def show_category_picker(itx: discord.Interaction, attachment: Optional[discord.Attachment],
+                               batch_list: Optional[List[discord.Attachment]] = None, claim_id: int = 0):
+    v = CategoryPicker(itx.user.id, attachment, batch_list=batch_list, claim_id=claim_id)
     try:
         await itx.response.edit_message(content="**Claim your achievement** — tap a category:", view=v)
         v.message = await itx.edit_original_response()
@@ -612,8 +681,9 @@ async def show_category_picker(itx: discord.Interaction, attachment: Optional[di
         m = await itx.followup.send("**Claim your achievement** — tap a category:", view=v)
         v.message = m
 
-async def show_role_picker(itx: discord.Interaction, cat_key: str, attachment: Optional[discord.Attachment], batch_list: Optional[List[discord.Attachment]] = None):
-    v = RolePicker(itx.user.id, cat_key, attachment, batch_list)
+async def show_role_picker(itx: discord.Interaction, cat_key: str, attachment: Optional[discord.Attachment],
+                           batch_list: Optional[List[discord.Attachment]] = None, claim_id: int = 0):
+    v = RolePicker(itx.user.id, cat_key, attachment, batch_list, claim_id=claim_id)
     try:
         await itx.response.edit_message(content=f"**{cat_key}** — choose the exact achievement:", view=v)
         v.message = await itx.edit_original_response()
@@ -644,7 +714,14 @@ async def finalize_grant(guild: discord.Guild, user_id: int, ach_key: str):
 
     _buffer_item(guild, user_id, role, ach)
 
-async def process_claim(itx: discord.Interaction, ach_key: str, att: Optional[discord.Attachment], batch_list: Optional[List[discord.Attachment]]):
+async def process_claim(itx: discord.Interaction, ach_key: str,
+                        att: Optional[discord.Attachment],
+                        batch_list: Optional[List[discord.Attachment]],
+                        claim_id: int):
+    # progress → suppress any future expiry
+    if claim_id:
+        CLAIM_STATE[claim_id] = "closed"
+
     guild = itx.guild
     ach = ACHIEVEMENTS.get(ach_key)
     if not ach:
@@ -679,9 +756,9 @@ async def process_claim(itx: discord.Interaction, ach_key: str, att: Optional[di
             color=discord.Color.orange(),
             timestamp=datetime.datetime.utcnow(),
         )
-        thumb = _big_role_icon_url(role)
+        thumb = resolve_hero_image(guild, role, ach)
         if thumb: emb.set_thumbnail(url=thumb)
-        v = GKReview(itx.user.id, ach_key, a)
+        v = GKReview(itx.user.id, ach_key, a, claim_id=claim_id)
         await itx.channel.send(content=f"{ping}, please review.", embed=emb, view=v)
 
     if batch_list:
@@ -833,7 +910,7 @@ async def on_message(msg: discord.Message):
         return
     await bot.process_commands(msg)
 
-    # Levels
+    # Levels auto-response (optional)
     try:
         for row in LEVELS:
             trig = row.get("trigger_contains") or row.get("Title") or ""
@@ -852,14 +929,23 @@ async def on_message(msg: discord.Message):
     images = [a for a in msg.attachments if _is_image(a)]
     if not images:
         return
+
     if len(images) == 1:
-        view = CategoryPicker(msg.author.id, images[0])
-        m = await msg.reply("**Claim your achievement**\nTap a category to continue. (Only you can use these buttons.)", view=view, mention_author=False)
+        view = CategoryPicker(msg.author.id, images[0], batch_list=None, claim_id=0, announce=True)
+        m = await msg.reply(
+            "**Claim your achievement**\nTap a category to continue. (Only you can use these buttons.)",
+            view=view, mention_author=False)
         view.message = m
+        view.claim_id = m.id
+        CLAIM_STATE[m.id] = "open"
     else:
-        view = MultiImageChoice(msg.author.id, images)
-        m = await msg.reply(f"**I found {len(images)} screenshots. What do you want to do?**", view=view, mention_author=False)
+        view = MultiImageChoice(msg.author.id, images, claim_id=0, announce=True)
+        m = await msg.reply(
+            f"**I found {len(images)} screenshots. What do you want to do?**",
+            view=view, mention_author=False)
         view.message = m
+        view.claim_id = m.id
+        CLAIM_STATE[m.id] = "open"
 
 # ---------------- startup ----------------
 async def _auto_refresh_loop(minutes: int):
