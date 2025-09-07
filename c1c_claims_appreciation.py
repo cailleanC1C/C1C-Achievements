@@ -1,6 +1,3 @@
-
-# NOTE: This bot now supports env fallbacks: GSHEET_ID | GOOGLE_SHEET_ID | CONFIG_SHEET_ID
-# and GOOGLE_SERVICE_ACCOUNT_JSON | SERVICE_ACCOUNT_JSON
 # c1c_claims_appreciation.py
 # C1C Appreciation + Claims Bot — Web Service (Flask keep-alive) + config loader + review flow
 
@@ -8,70 +5,6 @@ import os, re, json, asyncio, logging, datetime, threading, traceback
 from typing import Optional, List, Dict, Tuple
 from functools import partial
 from urllib.parse import urlparse
-
-
-# === C1C Canonical Helpers (harmonized) =====================================
-import sys, logging, json, os, re as _reh
-from typing import Optional as _Optional
-try:
-    from zoneinfo import ZoneInfo as _ZoneInfo
-except Exception:
-    _ZoneInfo = None
-from datetime import datetime as _dt, timezone as _tz
-
-def c1c_get_logger(name="c1c"):
-    if not logging.getLogger().handlers:
-        logging.basicConfig(level=logging.INFO,
-                            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-                            stream=sys.stdout)
-    return logging.getLogger(name)
-
-def c1c_make_intents():
-    import discord as _discord
-    intents = _discord.Intents.default()
-    intents.message_content = True
-    intents.members = True
-    intents.guilds = True
-    intents.reactions = True
-    return intents
-
-# Emoji resolver
-import discord as _discord
-_EMOJI_TAG_RE = _reh.compile(r"^<a?:\w+:\d+>$")
-def resolve_emoji_text(guild: _discord.Guild, value: _Optional[str], fallback: _Optional[str]=None) -> str:
-    v = (value or fallback or "").strip()
-    if not v: return ""
-    if _EMOJI_TAG_RE.match(v): return v
-    if v.isdigit():
-        e = _discord.utils.get(guild.emojis, id=int(v))
-        return str(e) if e else ""
-    e = _discord.utils.find(lambda x: x.name.lower()==v.lower(), guild.emojis)
-    return str(e) if e else v
-
-# Channel / thread formatter for human admins
-async def fmt_chan_or_thread(bot: _discord.Client, guild: _discord.Guild, target_id: int | None) -> str:
-    if not target_id: return "—"
-    obj = guild.get_channel(target_id) or await bot.fetch_channel(target_id)
-    if not obj: return f"(unknown) `{target_id}`"
-    mention = getattr(obj, "mention", f"<#{target_id}>")
-    name = getattr(obj, "name", "unknown")
-    return f"{mention} — **{name}** `{target_id}`"
-
-# Sheets client (unified)
-def gs_client():
-    import gspread as _gspread
-    from google.oauth2.service_account import Credentials as _Creds
-    raw = (os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or os.getenv("SERVICE_ACCOUNT_JSON"))
-    if not raw: raise RuntimeError("Set GOOGLE_SERVICE_ACCOUNT_JSON env var (or SERVICE_ACCOUNT_JSON).")
-    info = json.loads(raw)
-    creds = _Creds.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/spreadsheets"])
-    return _gs_client()
-
-def open_sheet_by_env():
-    sid = (os.getenv("GSHEET_ID") or os.getenv("GOOGLE_SHEET_ID") or os.getenv("CONFIG_SHEET_ID"))
-    if not sid: raise RuntimeError("Set GSHEET_ID (or GOOGLE_SHEET_ID / CONFIG_SHEET_ID).")
-    return gs_client().open_by_key(sid)
-# ============================================================================
 
 import discord
 from discord.ext import commands
@@ -105,7 +38,7 @@ log = logging.getLogger("c1c-claims")
 logging.basicConfig(level=logging.INFO)
 
 # ---------------- discord client ----------------
-intents = c1c_make_intents()
+intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.guilds = True
@@ -212,7 +145,7 @@ def load_config():
             creds = _svc_creds()
             if not creds:
                 raise RuntimeError("SERVICE_ACCOUNT_JSON missing/invalid")
-            gc = gs_client()
+            gc = gspread.authorize(creds)
             sh = gc.open_by_key(sid)
 
             row = sh.worksheet("General").get_all_records()[0]
