@@ -42,8 +42,11 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.guilds = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
+
+# Remove default help to use our custom embed
+bot.remove_command('help')
 # ---------------- runtime config ----------------
 CFG = {
     "public_claim_thread_id": None,
