@@ -274,7 +274,7 @@ def _httpish(url: Optional[str]) -> Optional[str]:
 
 def resolve_hero_image(guild: discord.Guild, role: discord.Role, ach_row: dict) -> Optional[str]:
     cat = _category_by_key(ach_row.get("category") or "")
-    return _httpish(ach_row.get("HeroImageURL")) or _httpish((cat or {}).get("hero_image_url")) or _big_role_icon_url(role)
+    return  _big_role_icon_url(role) or _httpish(ach_row.get("HeroImageURL")) or _httpish((cat or {}).get("hero_image_url"))
 
 async def safe_send_embed(dest, embed: discord.Embed):
     try:
