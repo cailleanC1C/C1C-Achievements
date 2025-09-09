@@ -44,10 +44,10 @@ intents.members = True
 intents.guilds = True
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
-
 # Remove default help to use our custom embed
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 bot.remove_command('help')  # belt + suspenders
+
 # ---------------- runtime config ----------------
 CFG = {
     "public_claim_thread_id": None,
@@ -895,98 +895,6 @@ async def testlevel(ctx: commands.Context, *, args: str = ""):
 async def ping(ctx: commands.Context):
     await ctx.send("✅ Live and listening.")
 
-# ---------------- error reporter ----------------
-@bot.event
-async def on_command_error(ctx: commands.Context, error: Exception):
-    if isinstance(error, commands.CommandNotFound):
-        return
-    try:
-        await ctx.send(f"⚠️ **{type(error).__name__}**: `{error}`")
-    except Exception:
-        pass
-    tb = "".join(traceback.format_exception(type(error), error, error.__traceback__))
-    log.error("Command error:\n%s", tb)
-
-# ---------------- message listener ----------------
-@bot.event
-async def on_message(msg: discord.Message):
-    if msg.author.bot:
-        return
-    await bot.process_commands(msg)
-
-    # Levels auto-response (optional)
-    try:
-        for row in LEVELS:
-            trig = row.get("trigger_contains") or row.get("Title") or ""
-            if trig and trig in msg.content:
-                user = msg.mentions[0] if msg.mentions else msg.author
-                ch = msg.guild.get_channel(CFG["levels_channel_id"]) if CFG["levels_channel_id"] else None
-                if ch:
-                    await ch.send(embed=build_level_embed(msg.guild, user, row))
-                break
-    except Exception:
-        pass
-
-    # Claims only in configured thread
-    if not CFG.get("public_claim_thread_id") or msg.channel.id != CFG.get("public_claim_thread_id"):
-        return
-    images = [a for a in msg.attachments if _is_image(a)]
-    if not images:
-        return
-
-    if len(images) == 1:
-        view = CategoryPicker(msg.author.id, images[0], batch_list=None, claim_id=0, announce=True)
-        m = await msg.reply(
-            "**Claim your achievement**\nTap a category to continue. (Only you can use these buttons.)",
-            view=view, mention_author=False)
-        view.message = m
-        view.claim_id = m.id
-        CLAIM_STATE[m.id] = "open"
-    else:
-        view = MultiImageChoice(msg.author.id, images, claim_id=0, announce=True)
-        m = await msg.reply(
-            f"**I found {len(images)} screenshots. What do you want to do?**",
-            view=view, mention_author=False)
-        view.message = m
-        view.claim_id = m.id
-        CLAIM_STATE[m.id] = "open"
-
-# ---------------- startup ----------------
-async def _auto_refresh_loop(minutes: int):
-    while True:
-        try:
-            await asyncio.sleep(minutes * 60)
-            load_config()
-            log.info(f"Auto-refreshed config from {CONFIG_META['source']} at {CONFIG_META['loaded_at']}")
-        except Exception:
-            log.exception("Auto-refresh failed")
-
-@bot.event
-async def on_ready():
-    log.info(f"Logged in as {bot.user} ({bot.user.id})")
-    try:
-        load_config()
-        log.info("Configuration loaded.")
-    except Exception as e:
-        log.error(f"Config error: {e}")
-        await bot.close()
-        return
-
-    mins = int(os.getenv("CONFIG_AUTO_REFRESH_MINUTES", "0") or "0")
-    global _AUTO_REFRESH_TASK
-    if mins > 0 and _AUTO_REFRESH_TASK is None:
-        _AUTO_REFRESH_TASK = asyncio.create_task(_auto_refresh_loop(mins))
-        log.info(f"Auto-refresh enabled: every {mins} minutes")
-
-if __name__ == "__main__":
-    token = os.getenv("DISCORD_BOT_TOKEN") or os.getenv("DISCORD_TOKEN")
-    if not token:
-        raise SystemExit("Set DISCORD_BOT_TOKEN")
-    keep_alive()
-    bot.run(token)
-
-
-
 # ========= C1C — Claims & Appreciation — Help (resilient, with fallbacks) =========
 C1C_LOGO_EMOJI = os.getenv("C1C_LOGO_EMOJI", "<:C1C:123456789012345678>")  # set your real emoji
 
@@ -1155,3 +1063,93 @@ async def claims_help(ctx: commands.Context):
             await ctx.send(build_claims_help_text(ctx.guild, prefix, ctx.bot))
         except Exception:
             pass
+
+# ---------------- error reporter ----------------
+@bot.event
+async def on_command_error(ctx: commands.Context, error: Exception):
+    if isinstance(error, commands.CommandNotFound):
+        return
+    try:
+        await ctx.send(f"⚠️ **{type(error).__name__}**: `{error}`")
+    except Exception:
+        pass
+    tb = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    log.error("Command error:\n%s", tb)
+
+# ---------------- message listener ----------------
+@bot.event
+async def on_message(msg: discord.Message):
+    if msg.author.bot:
+        return
+    await bot.process_commands(msg)
+
+    # Levels auto-response (optional)
+    try:
+        for row in LEVELS:
+            trig = row.get("trigger_contains") or row.get("Title") or ""
+            if trig and trig in msg.content:
+                user = msg.mentions[0] if msg.mentions else msg.author
+                ch = msg.guild.get_channel(CFG["levels_channel_id"]) if CFG["levels_channel_id"] else None
+                if ch:
+                    await ch.send(embed=build_level_embed(msg.guild, user, row))
+                break
+    except Exception:
+        pass
+
+    # Claims only in configured thread
+    if not CFG.get("public_claim_thread_id") or msg.channel.id != CFG.get("public_claim_thread_id"):
+        return
+    images = [a for a in msg.attachments if _is_image(a)]
+    if not images:
+        return
+
+    if len(images) == 1:
+        view = CategoryPicker(msg.author.id, images[0], batch_list=None, claim_id=0, announce=True)
+        m = await msg.reply(
+            "**Claim your achievement**\nTap a category to continue. (Only you can use these buttons.)",
+            view=view, mention_author=False)
+        view.message = m
+        view.claim_id = m.id
+        CLAIM_STATE[m.id] = "open"
+    else:
+        view = MultiImageChoice(msg.author.id, images, claim_id=0, announce=True)
+        m = await msg.reply(
+            f"**I found {len(images)} screenshots. What do you want to do?**",
+            view=view, mention_author=False)
+        view.message = m
+        view.claim_id = m.id
+        CLAIM_STATE[m.id] = "open"
+
+# ---------------- startup ----------------
+async def _auto_refresh_loop(minutes: int):
+    while True:
+        try:
+            await asyncio.sleep(minutes * 60)
+            load_config()
+            log.info(f"Auto-refreshed config from {CONFIG_META['source']} at {CONFIG_META['loaded_at']}")
+        except Exception:
+            log.exception("Auto-refresh failed")
+
+@bot.event
+async def on_ready():
+    log.info(f"Logged in as {bot.user} ({bot.user.id})")
+    try:
+        load_config()
+        log.info("Configuration loaded.")
+    except Exception as e:
+        log.error(f"Config error: {e}")
+        await bot.close()
+        return
+
+    mins = int(os.getenv("CONFIG_AUTO_REFRESH_MINUTES", "0") or "0")
+    global _AUTO_REFRESH_TASK
+    if mins > 0 and _AUTO_REFRESH_TASK is None:
+        _AUTO_REFRESH_TASK = asyncio.create_task(_auto_refresh_loop(mins))
+        log.info(f"Auto-refresh enabled: every {mins} minutes")
+
+if __name__ == "__main__":
+    token = os.getenv("DISCORD_BOT_TOKEN") or os.getenv("DISCORD_TOKEN")
+    if not token:
+        raise SystemExit("Set DISCORD_BOT_TOKEN")
+    keep_alive()
+    bot.run(token)
