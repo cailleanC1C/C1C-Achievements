@@ -46,7 +46,8 @@ bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 
 # Remove default help to use our custom embed
-bot.remove_command('help')
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+bot.remove_command('help')  # belt + suspenders
 # ---------------- runtime config ----------------
 CFG = {
     "public_claim_thread_id": None,
@@ -986,14 +987,10 @@ if __name__ == "__main__":
 
 
 
-# ========= C1C — Claims & Appreciation — Help (beautified) =========
+# ========= C1C — Claims & Appreciation — Help (resilient, with fallbacks) =========
 C1C_LOGO_EMOJI = os.getenv("C1C_LOGO_EMOJI", "<:C1C:123456789012345678>")  # set your real emoji
 
-def _resolve_logo_emoji(guild: discord.Guild, token: str) -> str:
-    """
-    Accepts '<:Name:ID>' or ':Name:' or 'Name'. Returns a displayable emoji string or the
-    original token if not found. No network calls; guild-only lookup.
-    """
+def _c1c_resolve_logo_emoji(guild: discord.Guild, token: str) -> str:
     token = (token or "").strip()
     if not guild:
         return token
@@ -1005,103 +1002,156 @@ def _resolve_logo_emoji(guild: discord.Guild, token: str) -> str:
     e = discord.utils.get(guild.emojis, name=name)
     return str(e) if e else token
 
-def _mention_chan_or_thread(bot: discord.Client, guild: discord.Guild, chan_id: int) -> str:
-    """
-    Resolve a channel or thread ID to a clickable mention like <#123>. Falls back to '#unknown' text.
-    """
+def _c1c_mention_chan_or_thread(bot: discord.Client, guild: discord.Guild, chan_id: int) -> str:
     try:
         if not chan_id:
             return ""
-        ch = bot.get_channel(int(chan_id)) if bot else None
-        if not ch and guild:
-            # Best-effort: try guild.get_channel for threads/channels
-            ch = guild.get_channel(int(chan_id))
+        ch = (bot.get_channel(int(chan_id)) if bot else None) or (guild.get_channel(int(chan_id)) if guild else None)
         return getattr(ch, "mention", f"<#{chan_id}>")
     except Exception:
         return f"<#{chan_id}>"
 
-
-def _resolve_help_color() -> discord.Color:
-    # Prefer ENV HELP_COLOR (hex like 0x5865F2 or #5865F2), else CFG.get("help_embed_color"), else blurple.
-    raw = os.getenv("HELP_COLOR", None)
-    val = None
-    def _parse_hex(h):
+def _c1c_help_color() -> discord.Color:
+    # HELP_COLOR env can be #HEX or 0xHEX; else CFG["help_embed_color"]; fallback blurple
+    def parse_hex(h):
         h = str(h).strip()
-        if h.startswith("#"):
-            h = h[1:]
-        if h.lower().startswith("0x"):
-            h = h[2:]
+        if h.startswith("#"): h = h[1:]
+        if h.lower().startswith("0x"): h = h[2:]
         return int(h, 16)
+    raw = os.getenv("HELP_COLOR")
     try:
         if raw:
-            val = _parse_hex(raw)
-        elif isinstance(CFG.get("help_embed_color"), int):
-            val = CFG.get("help_embed_color")
-        elif CFG.get("help_embed_color"):
-            val = _parse_hex(CFG.get("help_embed_color"))
+            return discord.Color(parse_hex(raw))
+        v = CFG.get("help_embed_color")
+        if isinstance(v, int):
+            return discord.Color(v)
+        if v:
+            return discord.Color(parse_hex(v))
     except Exception:
-        val = None
-    return discord.Color(val) if isinstance(val, int) else discord.Color.blurple()
+        pass
+    return discord.Color.blurple()
 
 def build_claims_help_embed(guild: discord.Guild, prefix: str, bot: discord.Client) -> discord.Embed:
     p = prefix or "!"
-    logo = _resolve_logo_emoji(guild, C1C_LOGO_EMOJI)
-
-    claims_thread = ""
-    levels_chan = ""
+    logo = _c1c_resolve_logo_emoji(guild, C1C_LOGO_EMOJI)
+    claims_thread = levels_chan = ""
     try:
-        if CFG.get("public_claim_thread_id"): claims_thread = _mention_chan_or_thread(bot, guild, int(CFG.get("public_claim_thread_id")))
-        if CFG.get("levels_channel_id"): levels_chan = _mention_chan_or_thread(bot, guild, int(CFG.get("levels_channel_id")))
+        if CFG.get("public_claim_thread_id"):
+            claims_thread = _c1c_mention_chan_or_thread(bot, guild, int(CFG.get("public_claim_thread_id")))
+        if CFG.get("levels_channel_id"):
+            levels_chan  = _c1c_mention_chan_or_thread(bot, guild, int(CFG.get("levels_channel_id")))
     except Exception:
         pass
-
     where_line = ""
     if claims_thread or levels_chan:
         if claims_thread and levels_chan:
             where_line = f"**Where** — Post in {claims_thread}; appreciation appears in {levels_chan}.\\n\\n"
         elif claims_thread:
             where_line = f"**Where** — Post in {claims_thread}.\\n\\n"
-        elif levels_chan:
+        else:
             where_line = f"**Where** — Appreciation appears in {levels_chan}.\\n\\n"
+
     desc = (
-        "_Submit achievements, let Guardian Knights review edge cases, and post clean appreciation messages to the levels channel._\n\n" + where_line + 
-        "**For Members**\n"
-        "• **Submit a claim:** Post a PNG/JPG screenshot in the configured claims thread. The bot replies with buttons — only **you** can use your panel.\n"
-        "• **Wrong pick?** Use the Cancel button and re-try. Claims expire after a short inactivity timeout.\n\n"
-        "**For Guardian Knights**\n"
-        "• **Review queue:** Approve to grant the role and trigger appreciation; Deny to request a new attempt.\n"
-        "• **Claim canceled by user?** The review panel auto-deletes or disables — no action needed.\n\n"
-        "**Appreciation Messages**\n"
-        "• When roles are granted, the bot posts a single appreciative embed (grouped within ~60s to avoid spam).\n"
-        "• Thumbnail art priority: **Role Icon → Achievement HeroImageURL → Category art**.\n\n"
-        "**Admin / Maintenance**\n"
-        f"• `{p}reloadconfig` — Reload config from Sheets / local file.\n"
-        f"• `{p}configstatus` — Show channel/thread/role mappings & source info.\n"
-        f"• `{p}listach` — List known achievement keys.\n"
-        f"• `{p}findach <text>` — Search achievements by text.\n"
-        f"• `{p}testach <key> [here|#channel]` — Preview an appreciation embed.\n"
-        f"• `{p}testlevel [@user]` — Fire a sample grouped message (safe).\n"
-        f"• `{p}ping` — Quick bot-alive check.\n\n"
-        "**Notes**\n"
-        "• Attachments: PNG/JPG, reasonable size (oversized/wrong types are rejected with a hint).\n"
-        "• Panels are owner-locked; appreciation text comes from your config.\n\n"
+        "_Submit achievements, let Guardian Knights review edge cases, and post clean appreciation messages to the levels channel._\\n\\n"
+        + where_line +
+        "**For Members**\\n"
+        "• **Submit a claim:** Post a PNG/JPG screenshot in the configured claims thread. The bot replies with buttons — only **you** can use your panel.\\n"
+        "• **Wrong pick?** Use the Cancel button and re-try. Claims expire after a short inactivity timeout.\\n\\n"
+        "**For Guardian Knights**\\n"
+        "• **Review queue:** Approve to grant the role and trigger appreciation; Deny to request a new attempt.\\n"
+        "• **Claim canceled by user?** The review panel auto-deletes or disables — no action needed.\\n\\n"
+        "**Appreciation Messages**\\n"
+        "• When roles are granted, the bot posts a single appreciative embed (grouped within ~60s to avoid spam).\\n"
+        "• Thumbnail art priority: **Role Icon → Achievement HeroImageURL → Category art**.\\n\\n"
+        "**Admin / Maintenance**\\n"
+        f"• `{p}reloadconfig` — Reload config from Sheets / local file.\\n"
+        f"• `{p}configstatus` — Show channel/thread/role mappings & source info.\\n"
+        f"• `{p}listach` — List known achievement keys.\\n"
+        f"• `{p}findach <text>` — Search achievements by text.\\n"
+        f"• `{p}testach <key> [here|#channel]` — Preview an appreciation embed.\\n"
+        f"• `{p}testlevel [@user]` — Fire a sample grouped message (safe).\\n"
+        f"• `{p}ping` — Quick bot-alive check.\\n\\n"
+        "**Notes**\\n"
+        "• Attachments: PNG/JPG, reasonable size (oversized/wrong types are rejected with a hint).\\n"
+        "• Panels are owner-locked; appreciation text comes from your config.\\n\\n"
         f"{logo}"
     )
 
     emb = discord.Embed(
         title="C1C — Claims & Appreciation — Help",
         description=desc,
-        color=_resolve_help_color(),
+        color=_c1c_help_color(),
     )
     emb.set_author(name="C1C – Claims & Appreciation")
     emb.set_footer(text="Questions? Run a preview with testach, or reloadconfig if Sheets changed.")
     return emb
 
-# Help command (beautified). No other commands added/removed.
+def build_claims_help_text(guild: discord.Guild, prefix: str, bot: discord.Client) -> str:
+    p = prefix or "!"
+    claims_thread = levels_chan = ""
+    try:
+        if CFG.get("public_claim_thread_id"):
+            claims_thread = _c1c_mention_chan_or_thread(bot, guild, int(CFG.get("public_claim_thread_id")))
+        if CFG.get("levels_channel_id"):
+            levels_chan  = _c1c_mention_chan_or_thread(bot, guild, int(CFG.get("levels_channel_id")))
+    except Exception:
+        pass
+    where_line = ""
+    if claims_thread or levels_chan:
+        if claims_thread and levels_chan:
+            where_line = f"Where — Post in {claims_thread}; appreciation appears in {levels_chan}.\\n\\n"
+        elif claims_thread:
+            where_line = f"Where — Post in {claims_thread}.\\n\\n"
+        else:
+            where_line = f"Where — Appreciation appears in {levels_chan}.\\n\\n"
+    lines = [
+        "C1C — Claims & Appreciation — Help",
+        "",
+        "Submit achievements, let Guardian Knights review edge cases, and post clean appreciation messages to the levels channel.",
+        "",
+        where_line.strip(),
+        "For Members",
+        "- Submit a claim: Post a PNG/JPG screenshot in the configured claims thread. Only you can use your panel.",
+        "- Wrong pick? Use Cancel and re-try. Claims expire after a short inactivity timeout.",
+        "",
+        "For Guardian Knights",
+        "- Approve to grant the role and trigger appreciation; Deny to request a new attempt.",
+        "- If the user cancels, the review panel auto-deletes or disables.",
+        "",
+        "Appreciation Messages",
+        "- Roles granted within ~60s are grouped into one message to reduce spam.",
+        "- Thumbnail priority: Role Icon → Achievement HeroImageURL → Category art.",
+        "",
+        "Admin / Maintenance",
+        f"- {p}reloadconfig — Reload config from Sheets / local file.",
+        f"- {p}configstatus — Show channel/thread/role mappings & source info.",
+        f"- {p}listach — List known achievement keys.",
+        f"- {p}findach <text> — Search achievements by text.",
+        f"- {p}testach <key> [here|#channel] — Preview an appreciation embed.",
+        f"- {p}testlevel [@user] — Fire a sample grouped message (safe).",
+        f"- {p}ping — Quick bot-alive check.",
+        "",
+        "Notes",
+        "- Attachments: PNG/JPG, reasonable size. Oversized/wrong types are rejected with a hint.",
+        "- Panels are owner-locked; appreciation text comes from your config.",
+    ]
+    return "\n".join([s for s in lines if s])
+
 @bot.command(name="help")
 async def claims_help(ctx: commands.Context):
     try:
-        prefix = getattr(ctx, "prefix", "!")
+        prefix = getattr(ctx, 'prefix', '!')
     except Exception:
-        prefix = "!"
-    await ctx.send(embed=build_claims_help_embed(ctx.guild, prefix, ctx.bot))
+        prefix = '!'
+    try:
+        emb = build_claims_help_embed(ctx.guild, prefix, ctx.bot)
+        await ctx.send(embed=emb)
+    except discord.Forbidden:
+        # Fallback to plaintext when embeds are blocked
+        await ctx.send(build_claims_help_text(ctx.guild, prefix, ctx.bot))
+    except Exception as e:
+        logging.exception("help command failed: %s", e)
+        try:
+            await ctx.send(build_claims_help_text(ctx.guild, prefix, ctx.bot))
+        except Exception:
+            pass
