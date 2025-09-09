@@ -217,7 +217,7 @@ def load_config():
         raise RuntimeError("No config loaded. Set CONFIG_SHEET_ID (+SERVICE_ACCOUNT_JSON) or LOCAL_CONFIG_XLSX.")
 
     CONFIG_META["source"] = source
-    CONFIG_META["loaded_at"] = datetime.datetime.utcnow()
+    CONFIG_META["loaded_at"] = datetime.datetime.now(datetime.timezone.utc)
 
 # ---------------- helpers ----------------
 def _is_image(att: discord.Attachment) -> bool:
@@ -334,7 +334,7 @@ def build_achievement_embed(guild: discord.Guild, user: discord.Member, role: di
     footer = _inject_tokens(_clean(ach_row.get("Footer")) or "", user=user, role=role, emoji=emoji)
     color = _color_from_hex(ach_row.get("ColorHex")) or (role.color if getattr(role.color, "value", 0) else discord.Color.blurple())
 
-    emb = discord.Embed(title=title, description=body, color=color, timestamp=datetime.datetime.utcnow())
+    emb = discord.Embed(title=title, description=body, color=color, timestamp=datetime.datetime.now(datetime.timezone.utc))
 
     if CFG.get("embed_author_name"):
         icon = _safe_icon(CFG.get("embed_author_icon"))
@@ -355,7 +355,7 @@ def build_achievement_embed(guild: discord.Guild, user: discord.Member, role: di
 def build_group_embed(guild: discord.Guild, user: discord.Member, items: List[Tuple[discord.Role, dict]]) -> discord.Embed:
     r0, a0 = items[0]
     color = _color_from_hex(a0.get("ColorHex")) or (r0.color if getattr(r0.color, "value", 0) else discord.Color.blurple())
-    emb = discord.Embed(title=f"{user.display_name} unlocked {len(items)} achievements", color=color, timestamp=datetime.datetime.utcnow())
+    emb = discord.Embed(title=f"{user.display_name} unlocked {len(items)} achievements", color=color, timestamp=datetime.datetime.now(datetime.timezone.utc))
 
     if CFG.get("embed_author_name"):
         icon = _safe_icon(CFG.get("embed_author_icon"))
@@ -388,7 +388,7 @@ def build_level_embed(guild: discord.Guild, user: discord.Member, row: dict) -> 
     footer = _inject_tokens(_clean(row.get("Footer")) or "", user=user, role=role_for_tokens, emoji=emoji)
     color = _color_from_hex(row.get("ColorHex")) or discord.Color.gold()
 
-    emb = discord.Embed(title=title, description=body, color=color, timestamp=datetime.datetime.utcnow())
+    emb = discord.Embed(title=title, description=body, color=color, timestamp=datetime.datetime.now(datetime.timezone.utc))
 
     if CFG.get("embed_author_name"):
         icon = _safe_icon(CFG.get("embed_author_icon"))
@@ -708,7 +708,7 @@ async def finalize_grant(guild: discord.Guild, user_id: int, ach_key: str):
                 title="Achievement Claimed",
                 description=f"**User:** {member.mention}\n**Role:** {role.mention}\n**Key:** `{ach_key}`",
                 color=discord.Color.green(),
-                timestamp=datetime.datetime.utcnow()
+                timestamp=datetime.datetime.now(datetime.timezone.utc)
             )
             await ch.send(embed=emb)
 
@@ -754,7 +754,7 @@ async def process_claim(itx: discord.Interaction, ach_key: str,
             title="Verification needed",
             description=f"{itx.user.mention} requested **{role.name}**",
             color=discord.Color.orange(),
-            timestamp=datetime.datetime.utcnow(),
+            timestamp=datetime.datetime.now(datetime.timezone.utc),
         )
         thumb = resolve_hero_image(guild, role, ach)
         if thumb: emb.set_thumbnail(url=thumb)
