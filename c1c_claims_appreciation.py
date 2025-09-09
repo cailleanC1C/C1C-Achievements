@@ -942,6 +942,7 @@ def _c1c_help_color() -> discord.Color:
 def build_claims_help_embed(guild: discord.Guild, prefix: str, bot: discord.Client) -> discord.Embed:
     p = prefix or "!"
     logo = _c1c_resolve_logo_emoji(guild, C1C_LOGO_EMOJI)
+
     claims_thread = levels_chan = ""
     try:
         if CFG.get("public_claim_thread_id"):
@@ -950,38 +951,39 @@ def build_claims_help_embed(guild: discord.Guild, prefix: str, bot: discord.Clie
             levels_chan  = _c1c_mention_chan_or_thread(bot, guild, int(CFG.get("levels_channel_id")))
     except Exception:
         pass
+
     where_line = ""
     if claims_thread or levels_chan:
         if claims_thread and levels_chan:
-            where_line = f"**Where** — Post in {claims_thread}; appreciation appears in {levels_chan}.\\n\\n"
+            where_line = f"**Where** — Post in {claims_thread}; appreciation appears in {levels_chan}.\n\n"
         elif claims_thread:
-            where_line = f"**Where** — Post in {claims_thread}.\\n\\n"
+            where_line = f"**Where** — Post in {claims_thread}.\n\n"
         else:
-            where_line = f"**Where** — Appreciation appears in {levels_chan}.\\n\\n"
+            where_line = f"**Where** — Appreciation appears in {levels_chan}.\n\n"
 
     desc = (
-        "_Submit achievements, let Guardian Knights review edge cases, and post clean appreciation messages to the levels channel._\\n\\n"
+        "_Submit achievements, let Guardian Knights review edge cases, and post clean appreciation messages to the levels channel._\n\n"
         + where_line +
-        "**For Members**\\n"
-        "• **Submit a claim:** Post a PNG/JPG screenshot in the configured claims thread. The bot replies with buttons — only **you** can use your panel.\\n"
-        "• **Wrong pick?** Use the Cancel button and re-try. Claims expire after a short inactivity timeout.\\n\\n"
-        "**For Guardian Knights**\\n"
-        "• **Review queue:** Approve to grant the role and trigger appreciation; Deny to request a new attempt.\\n"
-        "• **Claim canceled by user?** The review panel auto-deletes or disables — no action needed.\\n\\n"
-        "**Appreciation Messages**\\n"
-        "• When roles are granted, the bot posts a single appreciative embed (grouped within ~60s to avoid spam).\\n"
-        "• Thumbnail art priority: **Role Icon → Achievement HeroImageURL → Category art**.\\n\\n"
-        "**Admin / Maintenance**\\n"
-        f"• `{p}reloadconfig` — Reload config from Sheets / local file.\\n"
-        f"• `{p}configstatus` — Show channel/thread/role mappings & source info.\\n"
-        f"• `{p}listach` — List known achievement keys.\\n"
-        f"• `{p}findach <text>` — Search achievements by text.\\n"
-        f"• `{p}testach <key> [here|#channel]` — Preview an appreciation embed.\\n"
-        f"• `{p}testlevel [@user]` — Fire a sample grouped message (safe).\\n"
-        f"• `{p}ping` — Quick bot-alive check.\\n\\n"
-        "**Notes**\\n"
-        "• Attachments: PNG/JPG, reasonable size (oversized/wrong types are rejected with a hint).\\n"
-        "• Panels are owner-locked; appreciation text comes from your config.\\n\\n"
+        "**For Members**\n"
+        "• **Submit a claim:** Post a PNG/JPG screenshot in the configured claims thread. The bot replies with buttons — only **you** can use your panel.\n"
+        "• **Wrong pick?** Use the Cancel button and re-try. Claims expire after a short inactivity timeout.\n\n"
+        "**For Guardian Knights**\n"
+        "• **Review queue:** Approve to grant the role and trigger appreciation; Deny to request a new attempt.\n"
+        "• **Claim canceled by user?** The review panel auto-deletes or disables — no action needed.\n\n"
+        "**Appreciation Messages**\n"
+        "• When roles are granted, the bot posts a single appreciative embed (grouped within ~60s to avoid spam).\n"
+        "• Thumbnail art priority: **Role Icon → Achievement HeroImageURL → Category art**.\n\n"
+        "**Admin / Maintenance**\n"
+        f"• `{p}reloadconfig` — Reload config from Sheets / local file.\n"
+        f"• `{p}configstatus` — Show channel/thread/role mappings & source info.\n"
+        f"• `{p}listach` — List known achievement keys.\n"
+        f"• `{p}findach <text>` — Search achievements by text.\n"
+        f"• `{p}testach <key> [here|#channel]` — Preview an appreciation embed.\n"
+        f"• `{p}testlevel [@user]` — Fire a sample grouped message (safe).\n"
+        f"• `{p}ping` — Quick bot-alive check.\n\n"
+        "**Notes**\n"
+        "• Attachments: PNG/JPG, reasonable size (oversized/wrong types are rejected with a hint).\n"
+        "• Panels are owner-locked; appreciation text comes from your config.\n\n"
         f"{logo}"
     )
 
@@ -994,6 +996,7 @@ def build_claims_help_embed(guild: discord.Guild, prefix: str, bot: discord.Clie
     emb.set_footer(text="Questions? Run a preview with testach, or reloadconfig if Sheets changed.")
     return emb
 
+
 def build_claims_help_text(guild: discord.Guild, prefix: str, bot: discord.Client) -> str:
     p = prefix or "!"
     claims_thread = levels_chan = ""
@@ -1004,20 +1007,22 @@ def build_claims_help_text(guild: discord.Guild, prefix: str, bot: discord.Clien
             levels_chan  = _c1c_mention_chan_or_thread(bot, guild, int(CFG.get("levels_channel_id")))
     except Exception:
         pass
+
     where_line = ""
     if claims_thread or levels_chan:
         if claims_thread and levels_chan:
-            where_line = f"Where — Post in {claims_thread}; appreciation appears in {levels_chan}.\\n\\n"
+            where_line = f"Where — Post in {claims_thread}; appreciation appears in {levels_chan}.\n\n"
         elif claims_thread:
-            where_line = f"Where — Post in {claims_thread}.\\n\\n"
+            where_line = f"Where — Post in {claims_thread}.\n\n"
         else:
-            where_line = f"Where — Appreciation appears in {levels_chan}.\\n\\n"
+            where_line = f"Where — Appreciation appears in {levels_chan}.\n\n"
+
     lines = [
         "C1C — Claims & Appreciation — Help",
         "",
         "Submit achievements, let Guardian Knights review edge cases, and post clean appreciation messages to the levels channel.",
         "",
-        where_line.strip(),
+        where_line.rstrip(),
         "For Members",
         "- Submit a claim: Post a PNG/JPG screenshot in the configured claims thread. Only you can use your panel.",
         "- Wrong pick? Use Cancel and re-try. Claims expire after a short inactivity timeout.",
@@ -1042,8 +1047,11 @@ def build_claims_help_text(guild: discord.Guild, prefix: str, bot: discord.Clien
         "Notes",
         "- Attachments: PNG/JPG, reasonable size. Oversized/wrong types are rejected with a hint.",
         "- Panels are owner-locked; appreciation text comes from your config.",
+        "",
+        # no emoji in plaintext fallback
     ]
     return "\n".join([s for s in lines if s])
+
 
 @bot.command(name="help")
 async def claims_help(ctx: commands.Context):
