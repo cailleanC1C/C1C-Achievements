@@ -1,1403 +1,982 @@
-# C1C – WelcomeCrew (v16)
-# - Live watchers; notify-channel fallback (no DMs)
-# - Auto-join new threads / on-mention join
-# - Forgiving parsers; F-IT/multi-part tags; clanlist tags from column B
-# - Backfill leaves date blank if not closed; auto details attachment
-# - watch_status with last 5 actions
-# - Throttled/backoff Sheets writes; 4-digit tickets
-# - Dropdown tag picker w/ paging, timeout reload, and plain-text tag fallback
-# - Promo threads now also renamed to Closed-####-username-TAG
+# c1c_claims_appreciation.py
+# C1C Appreciation + Claims Bot — Web Service (Flask keep-alive) + config loader + review flow
 
-import os, json, re, asyncio, time, io, random
-from datetime import datetime, timezone as _tz
-from typing import Optional, Tuple, Dict, Any, List
-from collections import deque
+import os, re, json, asyncio, logging, datetime, threading, traceback
+from typing import Optional, List, Dict, Tuple
+from functools import partial
+from urllib.parse import urlparse
 
 import discord
 from discord.ext import commands
-import gspread
-from gspread.exceptions import APIError
+from flask import Flask
+
+# ---------------- keep-alive (Render web service) ----------------
+app = Flask(__name__)
+
+@app.route("/")
+def health():
+    return "ok", 200
+
+def keep_alive():
+    port = int(os.getenv("PORT", "10000"))
+    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=port), daemon=True).start()
+
+# ---------------- optional libs for config sources ----------------
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+except Exception:
+    gspread = None
 
 try:
-    from zoneinfo import ZoneInfo
+    import pandas as pd
 except Exception:
-    ZoneInfo = None
+    pd = None
 
-# ---------- Flags / Env ----------
-def env_bool(key: str, default: bool=True) -> bool:
-    raw = (os.getenv(key) or "").strip().upper()
-    if raw == "": return default
-    return raw == "ON"
+# ---------------- logging ----------------
+log = logging.getLogger("c1c-claims")
+logging.basicConfig(level=logging.INFO)
 
-TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("TOKEN") or ""
-WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID", "0"))
-PROMO_CHANNEL_ID   = int(os.getenv("PROMO_CHANNEL_ID", "0"))
-GSHEET_ID          = os.getenv("GSHEET_ID", "")
-TIMEZONE           = os.getenv("TIMEZONE", "UTC")
-SHEET1_NAME        = os.getenv("SHEET1_NAME", "Sheet1")
-SHEET4_NAME        = os.getenv("SHEET4_NAME", "Sheet4")
-CLANLIST_TAB_NAME  = os.getenv("CLANLIST_TAB_NAME", "clanlist")
-CLANLIST_TAG_COLUMN = int(os.getenv("CLANLIST_TAG_COLUMN", "2"))  # 1-based; default B
-
-SHEETS_THROTTLE_MS = int(os.getenv("SHEETS_THROTTLE_MS", "200"))
-
-# Feature toggles (commands / scans)
-ENABLE_INFER_TAG_FROM_THREAD = env_bool("ENABLE_INFER_TAG_FROM_THREAD", True)
-ENABLE_WELCOME_SCAN        = env_bool("ENABLE_WELCOME_SCAN", True)
-ENABLE_PROMO_SCAN          = env_bool("ENABLE_PROMO_SCAN", True)
-ENABLE_CMD_SHEETSTATUS     = env_bool("ENABLE_CMD_SHEETSTATUS", True)
-ENABLE_CMD_BACKFILL        = env_bool("ENABLE_CMD_BACKFILL", True)
-ENABLE_CMD_BACKFILL_STATUS = env_bool("ENABLE_CMD_BACKFILL_STATUS", True)
-ENABLE_CMD_DEDUPE          = env_bool("ENABLE_CMD_DEDUPE", True)
-ENABLE_CMD_RELOAD          = env_bool("ENABLE_CMD_RELOAD", True)
-ENABLE_CMD_HEALTH          = env_bool("ENABLE_CMD_HEALTH", True)
-ENABLE_CMD_PING            = env_bool("ENABLE_CMD_PING", True)
-ENABLE_CMD_CHECKSHEET      = env_bool("ENABLE_CMD_CHECKSHEET", True)
-ENABLE_CMD_REBOOT          = env_bool("ENABLE_CMD_REBOOT", True)
-ENABLE_WEB_SERVER          = env_bool("ENABLE_WEB_SERVER", True)
-
-# Live watchers
-ENABLE_LIVE_WATCH          = env_bool("ENABLE_LIVE_WATCH", True)
-ENABLE_LIVE_WATCH_WELCOME  = env_bool("ENABLE_LIVE_WATCH_WELCOME", True)
-ENABLE_LIVE_WATCH_PROMO    = env_bool("ENABLE_LIVE_WATCH_PROMO", True)
-
-# Auto-post results after backfill
-AUTO_POST_BACKFILL_DETAILS = env_bool("AUTO_POST_BACKFILL_DETAILS", True)
-POST_BACKFILL_SUMMARY      = env_bool("POST_BACKFILL_SUMMARY", False)
-
-# Private-thread fallback (NO DMs)
-ENABLE_NOTIFY_FALLBACK    = env_bool("ENABLE_NOTIFY_FALLBACK", True)
-NOTIFY_CHANNEL_ID         = int(os.getenv("NOTIFY_CHANNEL_ID", "0"))    # e.g., coordinators channel
-NOTIFY_PING_ROLE_ID       = int(os.getenv("NOTIFY_PING_ROLE_ID", "0"))  # optional role to ping
-ALLOW_SELF_JOIN_PRIVATE   = env_bool("ALLOW_SELF_JOIN_PRIVATE", True)
-
-# Require close marker? (you asked to leave date blank instead, so defaults OFF)
-REQUIRE_CLOSE_MARKER_WELCOME = env_bool("REQUIRE_CLOSE_MARKER_WELCOME", False)
-REQUIRE_CLOSE_MARKER_PROMO   = env_bool("REQUIRE_CLOSE_MARKER_PROMO", False)
-
-# ---------- Discord ----------
+# ---------------- discord client ----------------
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+intents.members = True
+intents.guilds = True
+bot = commands.Bot(command_prefix="!", intents=intents)
 
-START_TS = time.time()
-def uptime_str():
-    s = int(time.time() - START_TS); h, s = divmod(s,3600); m, s = divmod(s,60)
-    return f"{h:02d}:{m:02d}:{s:02d}"
-
-def fmt_tz(dt: datetime) -> str:
-    try:
-        if ZoneInfo:
-            tz = ZoneInfo(TIMEZONE) if TIMEZONE else ZoneInfo("UTC")
-            return dt.astimezone(tz).strftime("%Y-%m-%d %H:%M")
-    except Exception:
-        pass
-    return (dt or datetime.utcnow().replace(tzinfo=_tz.utc)).strftime("%Y-%m-%d %H:%M")
-
-def _print_boot_info():
-    print("=== WelcomeCrew v16 boot ===", flush=True)
-    print(f"Sheets: {SHEET1_NAME} / {SHEET4_NAME} / clanlist:{CLANLIST_TAB_NAME} (tags col={CLANLIST_TAG_COLUMN})", flush=True)
-    print(f"Welcome={WELCOME_CHANNEL_ID} Promo={PROMO_CHANNEL_ID}", flush=True)
-    print(f"TZ={TIMEZONE} | infer-from-thread={ENABLE_INFER_TAG_FROM_THREAD}", flush=True)
-    print(f"LiveWatch: {ENABLE_LIVE_WATCH} (welcome={ENABLE_LIVE_WATCH_WELCOME}, promo={ENABLE_LIVE_WATCH_PROMO})", flush=True)
-
-# ---------- Sheets ----------
-_gs_client = None
-_ws_cache: Dict[str, Any] = {}
-_index_simple: Dict[str, Dict[str,int]] = {}  # Sheet1: ticket -> row
-_index_promo:  Dict[str, Dict[str,int]] = {}  # Sheet4: ticket||type||created -> row
-
-HEADERS_SHEET1 = ["ticket number","username","clantag","date closed"]
-HEADERS_SHEET4 = ["ticket number","username","clantag","date closed","type","thread created"]
-
-def service_account_email() -> str:
-    try:
-        data = json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or "{}")
-        return data.get("client_email","")
-    except Exception:
-        return ""
-
-def gs_client():
-    global _gs_client
-    if _gs_client is None:
-        raw = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or ""
-        if not raw: raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON not set")
-        _gs_client = gspread.service_account_from_dict(json.loads(raw))
-    return _gs_client
-
-def get_ws(name: str, want_headers: List[str]):
-    if not GSHEET_ID: raise RuntimeError("GSHEET_ID not set")
-    if name in _ws_cache: return _ws_cache[name]
-    sh = gs_client().open_by_key(GSHEET_ID)
-    try:
-        ws = sh.worksheet(name)
-    except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=name, rows=4000, cols=max(10,len(want_headers)))
-        ws.append_row(want_headers)
-    else:
-        try:
-            head = ws.row_values(1)
-            if [h.strip().lower() for h in head] != [h.strip().lower() for h in want_headers]:
-                ws.update("A1", [want_headers])
-        except Exception:
-            pass
-    _ws_cache[name] = ws
-    return ws
-
-# ---------- Rate-limit helpers ----------
-def _sleep_ms(ms:int):
-    if ms > 0:
-        time.sleep(ms/1000.0)
-
-def _with_backoff(callable_fn, *a, **k):
-    delay = 0.5
-    for attempt in range(6):
-        try:
-            return callable_fn(*a, **k)
-        except APIError as e:
-            if "429" in str(e):
-                _sleep_ms(int(delay*1000 + random.randint(0,200)))
-                delay *= 2
-                continue
-            raise
-
-# --- HELP CARD (mobile, two-line bullets) ------------------------------------
-try:
-    bot.remove_command("help")
-except Exception:
-    pass
-
-HELP_ICON_URL = os.getenv("HELP_ICON_URL")
-EMBED_COLOR = 0x55CCFF
-
-def _mk_help_embed_mobile(guild: discord.Guild | None = None) -> discord.Embed:
-    e = discord.Embed(
-        title=" 🌿 C1C-WelcomeCrew — Help",
-        color=EMBED_COLOR,
-        description="I help to track Welcome & Promotion/Move threads and keep things tidy."
-    )
-    if HELP_ICON_URL:
-        e.set_thumbnail(url=HELP_ICON_URL)
-
-    # ——— User Actions ———
-    e.add_field(
-        name="User Actions — Recruiters & Mods",
-        value=(
-            "On Close Ticket, I pick up **`Ticket closed by <name>`** and log it.\n"
-            "I’ll prompt in-thread with a tag picker (or you can type just the tag, e.g., `C1C9`).\n"
-            "I rename the thread to **`Closed-####-username-TAG`** and write the record to the stats sheet."
-        ),
-        inline=False,
-    )
-
-    # ——— Commands (two-line layout per item) ———
-    commands_pairs = [
-        ("!env_check",        "show required env + hints"),
-        ("!sheetstatus",      "tabs + service account email"),
-        ("!backfill_tickets", "scan threads, show live status"),
-        ("!backfill_details", "upload diffs/skips as a file"),
-        ("!dedupe_sheet",     "keep newest entry"),
-        ("!watch_status",     "watcher ON/OFF + last actions"),
-        ("!reload",           "clear sheet cache"),
-        ("!checksheet",       "sheet row counts"),
-        ("!health",           "bot & Sheets health"),
-        ("!reboot",           "soft restart"),
-    ]
-    commands_lines = "\n".join([f"🔹 `{cmd}`\n  → {desc}" for cmd, desc in commands_pairs])
-    e.add_field(name="Commands — Admin & Maintenance", value=commands_lines, inline=False)
-
-    watchers = (
-        f"Watchers: **{'ON' if ENABLE_LIVE_WATCH else 'OFF'}** "
-        f"(welcome={'ON' if ENABLE_LIVE_WATCH_WELCOME else 'OFF'}, "
-        f"promo={'ON' if ENABLE_LIVE_WATCH_PROMO else 'OFF'})"
-    )
-    e.add_field(name="Status", value=watchers, inline=False)
-
-    e.set_footer(text="C1C 🔹 tidy logs, happy recruiters")
-    return e
-
-@bot.command(name="help")
-async def help_cmd(ctx: commands.Context):
-    await ctx.reply(embed=_mk_help_embed_mobile(ctx.guild), mention_author=False)
-
-@bot.tree.command(name="help", description="Show WelcomeCrew help")
-async def slash_help(interaction: discord.Interaction):
-    await interaction.response.send_message(
-        embed=_mk_help_embed_mobile(interaction.guild),
-        ephemeral=True
-    )
-
-# --- Ensure slash commands are visible (once per boot) -----------------------
-@bot.event
-async def setup_hook():
-    try:
-        await bot.tree.sync()
-        print("Slash commands synced.", flush=True)
-    except Exception as e:
-        print(f"Slash sync failed: {e}", flush=True)
-
-# ---------- Clanlist & tag matching ----------
-_clan_tags_cache: List[str] = []
-_clan_tags_norm_set: set = set()
-_last_clan_fetch = 0.0
-_tag_regex_cache = None
-
-def _normalize_dashes(s: str) -> str:
-    # en/em/figure hyphens -> ASCII '-'
-    return re.sub(r"[\u2010\u2011\u2012\u2013\u2014\u2015]", "-", s or "")
-
-def _fmt_ticket(s: str) -> str:
-    return (s or "").strip().lstrip("#").zfill(4)
-
-def _load_clan_tags(force: bool=False) -> List[str]:
-    global _clan_tags_cache, _clan_tags_norm_set, _last_clan_fetch, _tag_regex_cache
-    now = time.time()
-    if not force and _clan_tags_cache and (now - _last_clan_fetch < 300):
-        return _clan_tags_cache
-
-    tags: List[str] = []
-    try:
-        sh = gs_client().open_by_key(GSHEET_ID)
-        ws = sh.worksheet(CLANLIST_TAB_NAME)
-        values = ws.get_all_values() or []
-        if values:
-            header = [h.strip().lower() for h in values[0]] if values else []
-            col_idx = None
-            for key in ("clantag", "tag", "abbr", "code"):
-                if key in header:
-                    col_idx = header.index(key)
-                    break
-            if col_idx is None:
-                col_idx = max(0, CLANLIST_TAG_COLUMN - 1)
-            for row in values[1:]:
-                cell = row[col_idx] if col_idx < len(row) else ""
-                t = _normalize_dashes(cell).strip().upper()
-                if t:
-                    tags.append(t)
-
-        _clan_tags_cache = list(dict.fromkeys(tags))
-        _clan_tags_norm_set = { _normalize_dashes(t).upper() for t in _clan_tags_cache }
-        _last_clan_fetch = now
-
-        parts = sorted((_normalize_dashes(t).upper() for t in _clan_tags_cache), key=len, reverse=True)
-        if parts:
-            alt = "|".join(re.escape(p) for p in parts)
-            _tag_regex_cache = re.compile(rf"(?<![A-Za-z0-9_])(?:{alt})(?![A-Za-z0-9_])", re.IGNORECASE)
-        else:
-            _tag_regex_cache = None
-    except Exception as e:
-        print("Failed to load clanlist:", e, flush=True)
-        _clan_tags_cache = []; _clan_tags_norm_set = set(); _tag_regex_cache = None
-    return _clan_tags_cache
-
-def _match_tag_in_text(text: str) -> Optional[str]:
-    if not text: return None
-    _load_clan_tags(False)
-    if not _tag_regex_cache: return None
-    s = _normalize_dashes(text).upper()
-    m = _tag_regex_cache.search(s)
-    return m.group(0).upper() if m else None
-
-def _pick_tag_by_suffix(remainder: str, known_tags: List[str]) -> Optional[Tuple[str, str]]:
-    """
-    Try to find a '-TAG' suffix where TAG is in known_tags.
-    Supports multi-segment tags like 'F-IT'. Checks last 1..3 segments.
-    """
-    s = _normalize_dashes(remainder).strip()
-    parts = [p for p in s.split("-") if p != ""]
-    if not parts:
-        return None
-    norm_tags = _clan_tags_norm_set or { _normalize_dashes(t).upper() for t in known_tags }
-    max_k = min(3, len(parts))
-    for k in range(max_k, 0, -1):
-        cand = "-".join(parts[-k:]).upper()
-        if cand in norm_tags:
-            username = "-".join(parts[:-k])
-            return (username.strip(), cand)
-    return None
-
-# ---------- Indexers ----------
-def _key_promo(ticket: str, typ: str, created: str) -> str:
-    return f"{_fmt_ticket(ticket)}||{(typ or '').strip().lower()}||{(created or '').strip()}"
-
-def ws_index_welcome(name: str, ws) -> Dict[str,int]:
-    idx = {}
-    try:
-        colA = ws.col_values(1)[1:]
-        for i, val in enumerate(colA, start=2):
-            t = _fmt_ticket(val)
-            if t: idx[t] = i
-    except Exception: pass
-    _index_simple[name] = idx
-    return idx
-
-def ws_index_promo(name: str, ws) -> Dict[str,int]:
-    idx = {}
-    try:
-        values = ws.get_all_values()
-        if not values: return {}
-        header = [h.strip().lower() for h in values[0]]
-        col_ticket  = header.index("ticket number") if "ticket number" in header else 0
-        col_type    = header.index("type") if "type" in header else 4
-        col_created = header.index("thread created") if "thread created" in header else 5
-        for r_i, row in enumerate(values[1:], start=2):
-            t   = _fmt_ticket(row[col_ticket]  if col_ticket  < len(row) else "")
-            typ = (row[col_type]    if col_type    < len(row) else "").strip().lower()
-            cr  = (row[col_created] if col_created < len(row) else "").strip()
-            if t:
-                idx[_key_promo(t, typ, cr)] = r_i
-    except Exception: pass
-    _index_promo[name] = idx
-    return idx
-
-# ---------- Diff helpers ----------
-def _calc_diffs(header: List[str], before: List[str], after: List[str]) -> List[str]:
-    diffs = []
-    for i, col in enumerate(header):
-        old = (before[i] if i < len(before) else "").strip()
-        new = (after[i]  if i < len(after)  else "").strip()
-        if old != new:
-            diffs.append(f"{col}: '{old}' → '{new}'")
-    return diffs
-
-# ---------- Backfill state ----------
-def _new_bucket():
-    return {
-        "scanned":0,"added":0,"updated":0,"skipped":0,
-        "added_ids":[], "updated_ids":[], "skipped_ids":[],
-        "updated_details":[],
-        "skipped_reasons":{}
-    }
-
-backfill_state = {
-    "running": False,
-    "welcome": _new_bucket(),
-    "promo":   _new_bucket(),
-    "last_msg": ""
+# ---------------- runtime config ----------------
+CFG = {
+    "public_claim_thread_id": None,
+    "levels_channel_id": None,
+    "audit_log_channel_id": None,
+    "guardian_knights_role_id": None,
+    "group_window_seconds": 60,
+    "max_file_mb": 8,
+    "allowed_mimes": {"image/png", "image/jpeg"},
+    "locale": "en",
+    "hud_language": "EN",
+    "embed_author_name": None,         # blank disables the author row
+    "embed_author_icon": None,
+    "embed_footer_text": "C1C Achievements",
+    "embed_footer_icon": None,
 }
+CATEGORIES: List[dict] = []
+ACHIEVEMENTS: Dict[str, dict] = {}
+LEVELS: List[dict] = []
+REASONS: Dict[str, str] = {}
+CONFIG_META = {"source": "—", "loaded_at": None}
+_AUTO_REFRESH_TASK: Optional[asyncio.Task] = None
 
-# ---------- Upserts (throttled + backoff) ----------
-def upsert_welcome(name: str, ws, ticket: str, rowvals: List[str], st_bucket: dict) -> str:
-    ticket = _fmt_ticket(ticket)
-    idx = _index_simple.get(name) or ws_index_welcome(name, ws)
-    header = HEADERS_SHEET1
-    try:
-        if ticket in idx and idx[ticket] > 0:
-            row = idx[ticket]
-            before = _with_backoff(ws.row_values, row)
-            rng = f"A{row}:{chr(ord('A')+len(rowvals)-1)}{row}"
-            _sleep_ms(SHEETS_THROTTLE_MS)
-            _with_backoff(ws.batch_update, [{"range": rng, "values": [rowvals]}])
-            diffs = _calc_diffs(header, before, rowvals)
-            if diffs:
-                st_bucket["updated_details"].append(f"{ticket}: " + "; ".join(diffs))
-            return "updated"
-        _sleep_ms(SHEETS_THROTTLE_MS)
-        _with_backoff(ws.append_row, rowvals, value_input_option="RAW")
-        _index_simple.setdefault(name, {})[ticket] = _index_simple[name].get(ticket, -1)
-        return "inserted"
-    except Exception as e:
-        st_bucket["skipped_reasons"][ticket] = f"upsert error: {e}"
-        print("Welcome upsert error:", e, flush=True)
-        return "error"
+# ---- claim lifecycle: first prompt message id -> "open" | "canceled" | "expired" | "closed"
+CLAIM_STATE: Dict[int, str] = {}
 
-def _find_promo_row_pair(ws, ticket: str, typ: str) -> Optional[int]:
+# ---------------- config loading ----------------
+def _svc_creds():
+    raw = os.getenv("SERVICE_ACCOUNT_JSON", "").strip()
+    if not raw:
+        return None
+    data = json.loads(raw) if raw.startswith("{") else json.load(open(raw, "r", encoding="utf-8"))
+    scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+    return Credentials.from_service_account_info(data, scopes=scopes)
+
+def _truthy(x) -> bool:
+    if isinstance(x, bool): return x
+    return str(x or "").strip().lower() in ("true", "yes", "y", "1", "wahr")
+
+def _set_or_default(d: dict, key: str, default):
+    val = d.get(key, default)
+    if key == "allowed_mimes" and isinstance(val, str):
+        return set(x.strip() for x in val.split(",") if x.strip())
+    return val if val not in (None, "") else default
+
+def _to_str(x) -> str:
+    if x is None: return ""
+    if isinstance(x, float): return str(int(x)) if x.is_integer() else str(x)
+    if isinstance(x, int): return str(x)
+    return str(x)
+
+def _color_from_hex(hex_str: Optional[str]) -> Optional[discord.Color]:
+    if hex_str in (None, ""): return None
     try:
-        values = ws.get_all_values()
-        if not values: return None
-        header = [h.strip().lower() for h in values[0]]
-        col_ticket  = header.index("ticket number") if "ticket number" in header else 0
-        col_type    = header.index("type") if "type" in header else 4
-        for r_i, row in enumerate(values[1:], start=2):
-            t   = _fmt_ticket(row[col_ticket] if col_ticket < len(row) else "")
-            ty2 = (row[col_type] if col_type < len(row) else "").strip().lower()
-            if t == _fmt_ticket(ticket) and ty2 == (typ or "").strip().lower():
-                return r_i
+        s = _to_str(hex_str).strip().lstrip("#")
+        return discord.Color(int(s, 16))
+    except Exception:
+        return None
+
+def _safe_icon(icon_val: Optional[str]) -> Optional[str]:
+    s = _to_str(icon_val).strip()
+    if not s:
+        return None
+    try:
+        u = urlparse(s)
+        if u.scheme in ("http", "https") and u.netloc:
+            return s
     except Exception:
         pass
     return None
 
-def upsert_promo(name: str, ws, ticket: str, typ: str, created_str: str, rowvals: List[str], st_bucket: dict) -> str:
-    ticket = _fmt_ticket(ticket)
-    key = _key_promo(ticket, typ, created_str)
-    idx = _index_promo.get(name) or ws_index_promo(name, ws)
-    header = HEADERS_SHEET4
-    try:
-        if key in idx:
-            row = idx[key]
-            before = _with_backoff(ws.row_values, row)
-            rng = f"A{row}:{chr(ord('A')+len(rowvals)-1)}{row}"
-            _sleep_ms(SHEETS_THROTTLE_MS)
-            _with_backoff(ws.batch_update, [{"range": rng, "values": [rowvals]}])
-            diffs = _calc_diffs(header, before, rowvals)
-            if diffs:
-                st_bucket["updated_details"].append(f"{ticket}:{typ}:{created_str}: " + "; ".join(diffs))
-            return "updated"
-        rpair = _find_promo_row_pair(ws, ticket, typ)
-        if rpair:
-            before = _with_backoff(ws.row_values, rpair)
-            rng = f"A{rpair}:{chr(ord('A')+len(rowvals)-1)}{rpair}"
-            _sleep_ms(SHEETS_THROTTLE_MS)
-            _with_backoff(ws.batch_update, [{"range": rng, "values": [rowvals]}])
-            ws_index_promo(name, ws)
-            diffs = _calc_diffs(header, before, rowvals)
-            if diffs:
-                st_bucket["updated_details"].append(f"{ticket}:{typ}:{created_str}: " + "; ".join(diffs))
-            return "updated"
-        _sleep_ms(SHEETS_THROTTLE_MS)
-        _with_backoff(ws.append_row, rowvals, value_input_option="RAW")
-        ws_index_promo(name, ws)
-        return "inserted"
-    except Exception as e:
-        st_bucket["skipped_reasons"][f"{ticket}:{typ}:{created_str}"] = f"upsert error: {e}"
-        print("Promo upsert error:", e, flush=True)
-        return "error"
+def _opt(row: dict, key: str, default=None):
+    if key in row:
+        val = row.get(key)
+        s = _to_str(val).strip()
+        return None if s == "" else val
+    return default
 
-def dedupe_sheet(name: str, ws, has_type: bool=False) -> Tuple[int,int]:
-    values = ws.get_all_values()
-    if len(values) <= 1: return (0,0)
-    rows = values[1:]
-    header = [h.strip().lower() for h in values[0]]
+def _clean(text: Optional[str]) -> str:
+    s = _to_str(text)
+    if not s:
+        return ""
+    s = s.replace("\\n", "\n").replace("\r\n", "\n").replace("\r", "\n")
+    return s
 
-    col_ticket  = header.index("ticket number") if "ticket number" in header else 0
-    col_date    = header.index("date closed")   if "date closed"   in header else 3
+def load_config():
+    sid   = os.getenv("CONFIG_SHEET_ID", "").strip()
+    local = os.getenv("LOCAL_CONFIG_XLSX", "").strip()
+    global CFG, CATEGORIES, ACHIEVEMENTS, LEVELS, REASONS, CONFIG_META
 
-    if has_type:
-        col_type    = header.index("type")            if "type" in header else 4
-        col_created = header.index("thread created")  if "thread created" in header else 5
+    log.info(f"[boot] CONFIG_SHEET_ID set={bool(sid)} | LOCAL_CONFIG_XLSX set={bool(local)} | "
+             f"gspread_loaded={gspread is not None} | pandas_loaded={pd is not None}")
 
-    winners: Dict[str, Tuple[int, Optional[datetime]]] = {}
-    for i, row in enumerate(rows, start=2):
-        t = _fmt_ticket(row[col_ticket] if col_ticket < len(row) else "")
-        if not t: continue
-        if has_type:
-            typ = (row[col_type] if col_type < len(row) else "").strip().lower()
-            cr  = (row[col_created] if col_created < len(row) else "").strip()
-            key = _key_promo(t, typ, cr)
-        else:
-            key = t
-        dt = None
+    loaded = False
+    source = "—"
+
+    if sid and gspread:
         try:
-            dt = datetime.strptime((row[col_date] if col_date < len(row) else "").strip(), "%Y-%m-%d %H:%M").replace(tzinfo=_tz.utc)
-        except Exception:
-            pass
-        keep = winners.get(key)
-        if not keep or ((dt or datetime.min.replace(tzinfo=_tz.utc)) > (keep[1] or datetime.min.replace(tzinfo=_tz.utc))):
-            winners[key] = (i, dt)
+            creds = _svc_creds()
+            if not creds:
+                raise RuntimeError("SERVICE_ACCOUNT_JSON missing/invalid")
+            gc = gspread.authorize(creds)
+            sh = gc.open_by_key(sid)
 
-    keep_rows = {r for (r,_dt) in winners.values()}
-    to_delete = [i for i,_ in enumerate(rows,start=2) if i not in keep_rows]
-    deleted = 0
-    for r in sorted(to_delete, reverse=True):
-        try: ws.delete_rows(r); deleted += 1
-        except Exception: pass
-
-    if has_type: ws_index_promo(name, ws)
-    else: ws_index_welcome(name, ws)
-    return (len(winners), deleted)
-
-# ---------- Parsing + inference ----------
-WELCOME_START_RX = re.compile(r'(?i)^(?:closed[- ]*)?(\d{4})[- ]+(.+)$')
-PROMO_START_RX   = re.compile(r'(?i)^.*?(\d{4})-(.+)$')
-
-def _clean_username(s: str) -> str:
-    s = (s or "").strip()
-    return re.sub(r'^[\s\-]+|[\s\-]+$', '', s)
-
-def _aggregate_msg_text(msg: discord.Message) -> str:
-    parts = [msg.content or ""]
-    for e in msg.embeds or []:
-        parts += [e.title or "", e.description or ""]
-        if e.author and e.author.name: parts.append(e.author.name)
-        for f in e.fields or []:
-            parts += [f.name or "", f.value or ""]
-    return " | ".join(parts)
-
-async def infer_clantag_from_thread(thread: discord.Thread) -> Optional[str]:
-    if not ENABLE_INFER_TAG_FROM_THREAD:
-        return None
-    try: await thread.join()
-    except Exception: pass
-    try:
-        async for msg in thread.history(limit=500, oldest_first=False):
-            text = _aggregate_msg_text(msg)
-            tag = _match_tag_in_text(text)
-            if tag:
-                return tag
-    except discord.Forbidden:
-        return None
-    except Exception:
-        return None
-    return None
-
-def parse_welcome_thread_name_allow_missing(name: str) -> Optional[Tuple[str,str,Optional[str]]]:
-    if not name:
-        return None
-    s = _normalize_dashes(name).strip()
-
-    m = WELCOME_START_RX.match(s)
-    if not m:
-        m2 = re.search(r'(\d{4})', s)
-        if not m2:
-            return None
-        ticket = _fmt_ticket(m2.group(1))
-        remainder = s[m2.end():].lstrip(" -")
-    else:
-        ticket = _fmt_ticket(m.group(1))
-        remainder = m.group(2)
-
-    picked = _pick_tag_by_suffix(remainder, _load_clan_tags())
-    if picked:
-        username, tag = picked
-        return (ticket, _clean_username(username), tag)
-
-    any_tag = _match_tag_in_text(remainder)
-    if any_tag:
-        left = remainder.upper().split(any_tag.upper(), 1)[0]
-        left = re.sub(r'\bclosed\b', '', left, flags=re.IGNORECASE)
-        return (ticket, _clean_username(left), any_tag)
-
-    return (ticket, _clean_username(remainder), None)
-
-def parse_promo_thread_name(name: str) -> Optional[Tuple[str,str,str]]:
-    if not name: return None
-    m = PROMO_START_RX.match((name or "").strip())
-    if not m: return None
-    ticket = _fmt_ticket(m.group(1))
-    remainder = m.group(2)
-    picked = _pick_tag_by_suffix(remainder, _load_clan_tags())
-    if picked:
-        username, tag = picked
-        return (ticket, _clean_username(username), tag)
-    return (ticket, _clean_username(remainder), "")
-
-async def find_close_timestamp(thread: discord.Thread) -> Optional[datetime]:
-    try: await thread.join()
-    except Exception: pass
-    try:
-        async for msg in thread.history(limit=500, oldest_first=False):
-            text = _aggregate_msg_text(msg)
-            if "ticket closed by" in text.lower():
-                return msg.created_at
-    except discord.Forbidden: pass
-    except Exception: pass
-    return None
-
-# ---------- Watch status log ----------
-WATCH_LOG = deque(maxlen=50)
-
-def thread_link(thread: discord.Thread) -> str:
-    gid = getattr(thread.guild, "id", 0)
-    return f"https://discord.com/channels/{gid}/{thread.id}"
-
-def log_action(scope: str, action: str, **data):
-    ts = datetime.utcnow().replace(tzinfo=_tz.utc)
-    WATCH_LOG.appendleft({"ts": ts, "scope": scope, "action": action, "data": data})
-
-def render_watch_status_text() -> str:
-    on = "ON" if ENABLE_LIVE_WATCH else "OFF"
-    on_w = "ON" if ENABLE_LIVE_WATCH_WELCOME else "OFF"
-    on_p = "ON" if ENABLE_LIVE_WATCH_PROMO else "OFF"
-    lines = [f"👀 **Watchers**: {on} (welcome={on_w}, promo={on_p})"]
-    if WATCH_LOG:
-        lines.append("**Recent (latest 5):**")
-        for item in list(WATCH_LOG)[:5]:
-            ts = fmt_tz(item["ts"])
-            scope = item["scope"]; act = item["action"]
-            d = item["data"]
-            ticket   = d.get("ticket","")
-            username = d.get("username","")
-            clantag  = d.get("clantag","")
-            status   = d.get("status","")
-            link     = d.get("link","")
-            bits = [b for b in [ticket, username, clantag, status] if b]
-            summary = " | ".join(bits) if bits else ""
-            line = f"• [{ts}] {scope} · {act}"
-            if summary: line += f" · {summary}"
-            if link:    line += f" · <{link}>"
-            lines.append(line)
-    else:
-        lines.append("_No recent actions yet._")
-    return "\n".join(lines)
-
-# ---------- Fallback notify helpers ----------
-def _notify_prefix(guild: discord.Guild, closer: Optional[discord.User]) -> str:
-    parts = []
-    if NOTIFY_PING_ROLE_ID:
-        r = guild.get_role(NOTIFY_PING_ROLE_ID)
-        if r: parts.append(r.mention)
-    if closer:
-        parts.append(closer.mention)
-    return (" ".join(parts) + " ") if parts else ""
-
-async def _notify_channel(guild: discord.Guild, content: str):
-    if not ENABLE_NOTIFY_FALLBACK or not NOTIFY_CHANNEL_ID:
-        return False
-    ch = guild.get_channel(NOTIFY_CHANNEL_ID)
-    if not isinstance(ch, (discord.TextChannel, discord.Thread)):
-        return False
-    try:
-        await ch.send(content)
-        return True
-    except Exception:
-        return False
-
-async def _try_join_private_thread(thread: discord.Thread) -> bool:
-    try:
-        await thread.join(); return True
-    except Exception:
-        pass
-    if not ALLOW_SELF_JOIN_PRIVATE:
-        return False
-    try:
-        me = thread.guild.me
-        if me:
-            await thread.add_user(me)
-            return True
-    except Exception:
-        pass
-    return False
-
-def _who_to_ping(msg: discord.Message, thread: discord.Thread) -> Optional[discord.User]:
-    if msg and msg.mentions:
-        return msg.mentions[0]
-    try:
-        return thread.owner
-    except Exception:
-        return None
-
-# ---------- Tag prompt (dropdown + fallback) ----------
-async def _prompt_for_tag(thread: discord.Thread, ticket: str, username: str,
-                          msg_to_reply: Optional[discord.Message], mode: str):
-    tags = _load_clan_tags(False) or []
-    closer = _who_to_ping(msg_to_reply, thread)
-    mention = f"{closer.mention} " if closer else ""
-    content = (
-        f"{mention}Which clan tag for **{username}** (ticket **{_fmt_ticket(ticket)}**)?\n"
-        "Pick one from the menu below, or simply type the tag as a message."
-    )
-
-    try:
-        view = TagPickerView(mode, thread, ticket, username, tags)
-        sent = await thread.send(content, view=view, suppress_embeds=True)
-        view.message = sent
-        return
-    except discord.Forbidden:
-        if await _try_join_private_thread(thread):
+            row = sh.worksheet("General").get_all_records()[0]
+            CFG.update({
+                "public_claim_thread_id": int(row.get("public_claim_thread_id") or 0) or None,
+                "levels_channel_id": int(row.get("levels_channel_id") or 0) or None,
+                "audit_log_channel_id": int(row.get("audit_log_channel_id") or 0) or None,
+                "guardian_knights_role_id": int(row.get("guardian_knights_role_id") or 0) or None,
+                "group_window_seconds": int(row.get("group_window_seconds") or 60),
+                "max_file_mb": int(row.get("max_file_mb") or 8),
+                "allowed_mimes": _set_or_default(row, "allowed_mimes", {"image/png","image/jpeg"}),
+                "locale": row.get("locale") or "en",
+                "hud_language": row.get("hud_language") or "EN",
+                "embed_author_name": _opt(row, "embed_author_name", CFG["embed_author_name"]),
+                "embed_author_icon": _opt(row, "embed_author_icon", CFG["embed_author_icon"]),
+                "embed_footer_text": _opt(row, "embed_footer_text", CFG["embed_footer_text"]) or CFG["embed_footer_text"],
+                "embed_footer_icon": _opt(row, "embed_footer_icon", CFG["embed_footer_icon"]),
+            })
+            CATEGORIES = sh.worksheet("Categories").get_all_records()
+            ACHIEVEMENTS = {r["key"]: r for r in sh.worksheet("Achievements").get_all_records() if _truthy(r.get("Active", True))}
             try:
-                view = TagPickerView(mode, thread, ticket, username, tags)
-                sent = await thread.send(content, view=view, suppress_embeds=True)
-                view.message = sent
-                return
+                LEVELS = [r for r in sh.worksheet("Levels").get_all_records() if _truthy(r.get("Active", True))]
             except Exception:
-                pass
-    except Exception:
-        pass
+                LEVELS = []
+            REASONS = {r["code"]: r["message"] for r in sh.worksheet("Reasons").get_all_records()}
 
-    prefix = _notify_prefix(thread.guild, closer)
-    await _notify_channel(
-        thread.guild,
-        f"{prefix}Need clan tag for **{username}** (ticket **{_fmt_ticket(ticket)}**) → {thread_link(thread)}"
-    )
+            loaded = True
+            source = "Google Sheets"
+            log.info("Config loaded from Google Sheets")
+        except Exception as e:
+            log.warning(f"GSheet load failed: {e}", exc_info=True)
 
-# ---------- Finalizers (log + rename) ----------
-async def _rename_welcome_thread_if_needed(thread: discord.Thread, ticket: str, username: str, clantag: str) -> bool:
-    """
-    Ensure threads are named exactly: Closed-####-username-TAG
-    (keeps a single 'Closed-' prefix; avoids double-prefixing)
-    """
-    try:
-        core = f"{_fmt_ticket(ticket)}-{username}-{clantag}".strip("-")
-        desired = f"Closed-{core}"
-        current = (thread.name or "").strip()
+    if not loaded and local and pd:
+        try:
+            if not os.path.isabs(local):
+                local = os.path.join("/opt/render/project/src", local)
+            xl = pd.ExcelFile(local)
+            gen = pd.read_excel(xl, "General").to_dict("records")[0]
+            CFG.update({
+                "public_claim_thread_id": int(gen.get("public_claim_thread_id") or 0) or None,
+                "levels_channel_id": int(gen.get("levels_channel_id") or 0) or None,
+                "audit_log_channel_id": int(gen.get("audit_log_channel_id") or 0) or None,
+                "guardian_knights_role_id": int(gen.get("guardian_knights_role_id") or 0) or None,
+                "group_window_seconds": int(gen.get("group_window_seconds") or 60),
+                "max_file_mb": int(gen.get("max_file_mb") or 8),
+                "allowed_mimes": _set_or_default(gen, "allowed_mimes", {"image/png","image/jpeg"}),
+                "locale": gen.get("locale") or "en",
+                "hud_language": gen.get("hud_language") or "EN",
+                "embed_author_name": _opt(gen, "embed_author_name", CFG["embed_author_name"]),
+                "embed_author_icon": _opt(gen, "embed_author_icon", CFG["embed_author_icon"]),
+                "embed_footer_text": _opt(gen, "embed_footer_text", CFG["embed_footer_text"]) or CFG["embed_footer_text"],
+                "embed_footer_icon": _opt(gen, "embed_footer_icon", CFG["embed_footer_icon"]),
+            })
+            CATEGORIES = pd.read_excel(xl, "Categories").to_dict("records")
+            ACHIEVEMENTS = {r["key"]: r for r in pd.read_excel(xl, "Achievements").to_dict("records") if _truthy(r.get("Active", True))}
+            try:
+                LEVELS = [r for r in pd.read_excel(xl, "Levels").to_dict("records") if _truthy(r.get("Active", True))]
+            except Exception:
+                LEVELS = []
+            REASONS = {r["code"]: r["message"] for r in pd.read_excel(xl, "Reasons").to_dict("records")}
 
-        cur_norm = _normalize_dashes(current)
-        if cur_norm.lower().startswith("closed-"):
-            cur_norm = "Closed-" + cur_norm[7:]  # normalize case of prefix
+            loaded = True
+            source = "Excel file"
+            log.info("Config loaded from Excel")
+        except Exception as e:
+            log.error(f"Excel load failed: {e}", exc_info=True)
 
-        if cur_norm != desired and clantag:
-            await thread.edit(name=desired)
-            return True
-    except discord.Forbidden:
-        pass
-    except Exception:
-        pass
-    return False
+    if not loaded:
+        raise RuntimeError("No config loaded. Set CONFIG_SHEET_ID (+SERVICE_ACCOUNT_JSON) or LOCAL_CONFIG_XLSX.")
 
-async def _finalize_welcome(thread: discord.Thread, ticket: str, username: str, clantag: str, close_dt: Optional[datetime]):
-    ws = get_ws(SHEET1_NAME, HEADERS_SHEET1)
-    renamed = await _rename_welcome_thread_if_needed(thread, ticket, username, clantag or "")
-    if renamed:
-        log_action("welcome", "renamed", ticket=_fmt_ticket(ticket), username=username, clantag=clantag or "", link=thread_link(thread))
-    date_str = fmt_tz(close_dt) if close_dt else ""
-    row = [_fmt_ticket(ticket), username, clantag or "", date_str]
-    dummy_bucket = _new_bucket()
-    status = upsert_welcome(SHEET1_NAME, ws, ticket, row, dummy_bucket)
-    log_action("welcome", "logged", ticket=_fmt_ticket(ticket), username=username, clantag=clantag or "", status=status, link=thread_link(thread))
+    CONFIG_META["source"] = source
+    CONFIG_META["loaded_at"] = datetime.datetime.utcnow()
 
-async def _finalize_promo(thread: discord.Thread, ticket: str, username: str, clantag: str, close_dt: Optional[datetime]):
-    ws = get_ws(SHEET4_NAME, HEADERS_SHEET4)
+# ---------------- helpers ----------------
+def _is_image(att: discord.Attachment) -> bool:
+    ct = (att.content_type or "").lower()
+    if ct in CFG["allowed_mimes"]: return True
+    fn = att.filename.lower()
+    return fn.endswith(".png") or fn.endswith(".jpg") or fn.endswith(".jpeg")
 
-    # Rename promo/move threads too (same canonical format as welcome)
-    renamed = await _rename_welcome_thread_if_needed(thread, ticket, username, clantag or "")
-    if renamed:
-        log_action("promo", "renamed",
-                   ticket=_fmt_ticket(ticket), username=username,
-                   clantag=clantag or "", link=thread_link(thread))
-
-    typ = await detect_promo_type(thread) or ""
-    created_str = fmt_tz(thread.created_at)
-    date_str = fmt_tz(close_dt) if close_dt else ""
-    row = [_fmt_ticket(ticket), username, clantag or "", date_str, typ, created_str]
-    dummy_bucket = _new_bucket()
-    status = upsert_promo(SHEET4_NAME, ws, ticket, typ, created_str, row, dummy_bucket)
-    log_action("promo", "logged",
-               ticket=_fmt_ticket(ticket), username=username,
-               clantag=clantag or "", status=status, link=thread_link(thread))
-
-# ---------- Scans (backfill) ----------
-def _new_report_bucket(): return _new_bucket()
-
-async def scan_welcome_channel(channel: discord.TextChannel, progress_cb=None):
-    st = backfill_state["welcome"] = _new_report_bucket()
-    if not ENABLE_WELCOME_SCAN:
-        backfill_state["last_msg"] = "welcome scan disabled"; return
-    ws = get_ws(SHEET1_NAME, HEADERS_SHEET1)
-    ws_index_welcome(SHEET1_NAME, ws)
-
-    async def handle(th: discord.Thread):
-        if not backfill_state["running"]: return
-        await _handle_welcome_thread(th, ws, st)
-        if progress_cb: await progress_cb()
-
-    try:
-        for th in channel.threads:
-            if not backfill_state["running"]: break
-            await handle(th)
-    except Exception: pass
-    try:
-        async for th in channel.archived_threads(limit=None, private=False):
-            if not backfill_state["running"]: break
-            await handle(th)
-    except discord.Forbidden:
-        backfill_state["last_msg"] += " | no access to public archived welcome threads"
-    try:
-        async for th in channel.archived_threads(limit=None, private=True):
-            if not backfill_state["running"]: break
-            await handle(th)
-    except discord.Forbidden:
-        backfill_state["last_msg"] += " | no access to private archived welcome threads"
-
-async def _handle_welcome_thread(th: discord.Thread, ws, st):
-    if not backfill_state["running"]: return
-    st["scanned"] += 1
-    parsed = parse_welcome_thread_name_allow_missing(th.name or "")
-    if not parsed:
-        key = f"name:{th.name}"
-        st["skipped"] += 1; st["skipped_ids"].append(key); st["skipped_reasons"][key] = "name parse fail"
-        return
-    ticket, username, clantag = parsed
-    if not clantag:
-        inferred = await infer_clantag_from_thread(th)
-        clantag = inferred or ""
-    dt = await find_close_timestamp(th)
-    if REQUIRE_CLOSE_MARKER_WELCOME and not dt:
-        date_str = ""
-    else:
-        date_str = fmt_tz(dt) if dt else ""
-    row = [ticket, username, clantag, date_str]
-    status = upsert_welcome(SHEET1_NAME, ws, ticket, row, st)
-    if status == "inserted":
-        st["added"] += 1; st["added_ids"].append(ticket)
-    elif status == "updated":
-        st["updated"] += 1; st["updated_ids"].append(ticket)
-    else:
-        st["skipped"] += 1; st["skipped_ids"].append(ticket); st["skipped_reasons"].setdefault(ticket, "unknown")
-
-async def scan_promo_channel(channel: discord.TextChannel, progress_cb=None):
-    st = backfill_state["promo"] = _new_report_bucket()
-    if not ENABLE_PROMO_SCAN:
-        backfill_state["last_msg"] = "promo scan disabled"; return
-    ws = get_ws(SHEET4_NAME, HEADERS_SHEET4)
-    ws_index_promo(SHEET4_NAME, ws)
-
-    async def handle(th: discord.Thread):
-        if not backfill_state["running"]: return
-        await _handle_promo_thread(th, ws, st)
-        if progress_cb: await progress_cb()
-
-    try:
-        for th in channel.threads:
-            if not backfill_state["running"]: break
-            await handle(th)
-    except Exception: pass
-    try:
-        async for th in channel.archived_threads(limit=None, private=False):
-            if not backfill_state["running"]: break
-            await handle(th)
-    except discord.Forbidden:
-        backfill_state["last_msg"] += " | no access to public archived promo threads"
-    try:
-        async for th in channel.archived_threads(limit=None, private=True):
-            if not backfill_state["running"]: break
-            await handle(th)
-    except discord.Forbidden:
-        backfill_state["last_msg"] += " | no access to private archived promo threads"
-
-async def _handle_promo_thread(th: discord.Thread, ws, st):
-    if not backfill_state["running"]: return
-    st["scanned"] += 1
-    parsed = parse_promo_thread_name(th.name or "")
-    if not parsed:
-        key = f"name:{th.name}"
-        st["skipped"] += 1; st["skipped_ids"].append(key); st["skipped_reasons"][key] = "name parse fail"
-        return
-    ticket, username, clantag = parsed
-    typ = await detect_promo_type(th) or ""
-    dt_close = await find_close_timestamp(th)
-    if REQUIRE_CLOSE_MARKER_PROMO and not dt_close:
-        date_str = ""
-    else:
-        date_str = fmt_tz(dt_close) if dt_close else ""
-    created_str = fmt_tz(th.created_at)
-    row = [ticket, username, clantag, date_str, typ, created_str]
-    status = upsert_promo(SHEET4_NAME, ws, ticket, typ, created_str, row, st)
-    key = f"{ticket}:{typ or 'unknown'}:{created_str}"
-    if status == "inserted":
-        st["added"] += 1; st["added_ids"].append(key)
-    elif status == "updated":
-        st["updated"] += 1; st["updated_ids"].append(key)
-    else:
-        st["skipped"] += 1; st["skipped_ids"].append(key); st["skipped_reasons"].setdefault(key, "unknown")
-
-# ---------- Promo type detection ----------
-PROMO_TYPE_PATTERNS = [
-    (re.compile(r"(?i)we['’]re excited to have you returning"), "returning player"),
-    (re.compile(r"(?i)thanks for sending in your move request"), "player move request"),
-    (re.compile(r"(?i)we['’]ve received your request to help one of your clan members find a new home"), "clan lead move request"),
-]
-async def detect_promo_type(thread: discord.Thread) -> Optional[str]:
-    try: await thread.join()
-    except Exception: pass
-    try:
-        async for msg in thread.history(limit=500, oldest_first=False):
-            text = _aggregate_msg_text(msg)
-            for rx, typ in PROMO_TYPE_PATTERNS:
-                if rx.search(text):
-                    return typ
-    except discord.Forbidden: pass
-    except Exception: pass
+def _big_role_icon_url(role: discord.Role) -> Optional[str]:
+    asset = getattr(role, "display_icon", None) or getattr(role, "icon", None)
+    if asset:
+        try: return asset.with_size(512).url
+        except Exception: return asset.url
     return None
 
-# ---------- Auto-post helper for details ----------
-def _build_backfill_details_text() -> str:
-    w = backfill_state["welcome"]; p = backfill_state["promo"]
-    def section(title, lines):
-        return [title] + (lines if lines else ["(none)"]) + [""]
-    lines: List[str] = []
-    lines += section("WELCOME — UPDATED (with diffs):", w["updated_details"])
-    lines += section("WELCOME — SKIPPED (id -> reason):", [f"{k} -> {v}" for k,v in w["skipped_reasons"].items()])
-    lines += section("PROMO — UPDATED (with diffs):", p["updated_details"])
-    lines += section("PROMO — SKIPPED (id -> reason):", [f"{k} -> {v}" for k,v in p["skipped_reasons"].items()])
-    return "\n".join(lines) or "(empty)"
+def _get_role_by_config(guild: discord.Guild, ach_row: dict) -> Optional[discord.Role]:
+    rid = int(ach_row.get("role_id") or 0)
+    if rid:
+        r = guild.get_role(rid)
+        if r: return r
+    name = ach_row.get("display_name") or ach_row.get("key")
+    return discord.utils.get(guild.roles, name=name)
 
-# ---------- Commands ----------
-def cmd_enabled(flag: bool):
-    def deco(func):
-        async def wrapper(ctx: commands.Context, *a, **k):
-            if not flag:
-                return await ctx.reply("This command is disabled by env flag.", mention_author=False)
-            return await func(ctx, *a, **k)
-        return wrapper
-    return deco
+def _category_by_key(cat_key: str) -> Optional[dict]:
+    for c in CATEGORIES:
+        if c.get("category") == cat_key:
+            return c
+    return None
 
-def _red(s: str, keep: int = 6) -> str:
-    if not s: return "(empty)"
-    if len(s) <= keep: return "*" * len(s)
-    return s[:keep] + "…" + "*" * 6
+EMOJI_TAG_RE = re.compile(r"^<a?:\w+:\d+>$")
 
-@bot.command(name="env_check")
-async def cmd_env_check(ctx):
-    def ok(b): return "✅" if b else "❌"
+def resolve_emoji_text(guild: discord.Guild, value: Optional[str], fallback: Optional[str]=None) -> str:
+    v = _to_str(value).strip()
+    if not v:
+        v = _to_str(fallback).strip()
+    if not v:
+        return ""
+    if EMOJI_TAG_RE.match(v):
+        return v
+    if v.isdigit():
+        e = discord.utils.get(guild.emojis, id=int(v))
+        return f"<{'a' if e.animated else ''}:{e.name}:{e.id}>" if e else ""
+    e = discord.utils.get(guild.emojis, name=v)
+    return f"<{'a' if e.animated else ''}:{e.name}:{e.id}>" if e else v
 
-    req = {
-        "DISCORD_TOKEN": bool(os.getenv("DISCORD_TOKEN")),
-        "GSHEET_ID": bool(os.getenv("GSHEET_ID")),
-        "GOOGLE_SERVICE_ACCOUNT_JSON": bool(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")),
-        "WELCOME_CHANNEL_ID": bool(int(os.getenv("WELCOME_CHANNEL_ID", "0"))),
-        "PROMO_CHANNEL_ID": bool(int(os.getenv("PROMO_CHANNEL_ID", "0"))),
-    }
+def _inject_tokens(text: str, *, user: discord.Member, role: discord.Role, emoji: str) -> str:
+    return (text or "").replace("{user}", user.mention).replace("{role}", role.name).replace("{emoji}", emoji)
 
+def _httpish(url: Optional[str]) -> Optional[str]:
+    u = _to_str(url).strip()
+    if u.startswith("http://") or u.startswith("https://"):
+        return u
+    return None
+
+def resolve_hero_image(guild: discord.Guild, role: discord.Role, ach_row: dict) -> Optional[str]:
+    cat = _category_by_key(ach_row.get("category") or "")
+    return _httpish(ach_row.get("HeroImageURL")) or _httpish((cat or {}).get("hero_image_url")) or _big_role_icon_url(role)
+
+async def safe_send_embed(dest, embed: discord.Embed):
     try:
-        sa_ok = bool(json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or "{}").get("client_email"))
-    except Exception:
-        sa_ok = False
+        return await dest.send(embed=embed)
+    except discord.Forbidden:
+        return await dest.send(
+            "I tried to send an embed here but I'm missing **Embed Links**.\n"
+            "Ask an admin to enable that for me in this channel."
+        )
+    except Exception as e:
+        return await dest.send(f"Couldn’t send embed: `{e}`")
 
-    notify_id = int(os.getenv("NOTIFY_CHANNEL_ID", "0"))
-    notify_role = int(os.getenv("NOTIFY_PING_ROLE_ID", "0"))
-    tz = os.getenv("TIMEZONE", "UTC")
-    clan_col = int(os.getenv("CLANLIST_TAG_COLUMN", "2"))
+def _resolve_target_channel(ctx: commands.Context, where: Optional[str]):
+    if not where:
+        ch = ctx.guild.get_channel(CFG.get("levels_channel_id") or 0)
+        return ch or ctx.channel
+    w = where.strip().lower()
+    if w == "here":
+        return ctx.channel
+    if ctx.message.channel_mentions:
+        return ctx.message.channel_mentions[0]
+    digits = re.sub(r"[^\d]", "", where)
+    if digits.isdigit():
+        ch = ctx.guild.get_channel(int(digits))
+        if ch: return ch
+    return ctx.channel
 
-    toggles = {
-        "ENABLE_LIVE_WATCH": ENABLE_LIVE_WATCH,
-        "  welcome": ENABLE_LIVE_WATCH_WELCOME,
-        "  promo": ENABLE_LIVE_WATCH_PROMO,
-        "ENABLE_WELCOME_SCAN": ENABLE_WELCOME_SCAN,
-        "ENABLE_PROMO_SCAN": ENABLE_PROMO_SCAN,
-        "ENABLE_INFER_TAG_FROM_THREAD": ENABLE_INFER_TAG_FROM_THREAD,
-        "ENABLE_NOTIFY_FALLBACK": ENABLE_NOTIFY_FALLBACK,
-        "AUTO_POST_BACKFILL_DETAILS": AUTO_POST_BACKFILL_DETAILS,
-        "POST_BACKFILL_SUMMARY": POST_BACKFILL_SUMMARY,
-        "REQUIRE_CLOSE_MARKER_WELCOME": REQUIRE_CLOSE_MARKER_WELCOME,
-        "REQUIRE_CLOSE_MARKER_PROMO": REQUIRE_CLOSE_MARKER_PROMO,
-    }
+async def _fmt_chan_or_thread(guild: discord.Guild, chan_id: int | None) -> str:
+    if not chan_id:
+        return "—"
+    obj = guild.get_channel(chan_id)
+    if obj is None:
+        try:
+            obj = await guild.fetch_channel(chan_id)
+        except Exception:
+            obj = None
+    if obj is None:
+        return f"(unknown) `{chan_id}`"
+    name = getattr(obj, "name", "unknown")
+    mention = getattr(obj, "mention", f"`#{name}`")
+    return f"{mention} — **{name}** `{chan_id}`"
+
+def _fmt_role(guild: discord.Guild, role_id: int | None) -> str:
+    if not role_id:
+        return "—"
+    r = guild.get_role(role_id)
+    if not r:
+        return f"(unknown role) `{role_id}`"
+    return f"{r.mention} — **{r.name}** `{role_id}`"
+
+# ---------------- embed builders ----------------
+def build_achievement_embed(guild: discord.Guild, user: discord.Member, role: discord.Role, ach_row: dict) -> discord.Embed:
+    cat = _category_by_key(ach_row.get("category") or "")
+    emoji = resolve_emoji_text(guild, ach_row.get("EmojiNameOrId"), fallback=(cat or {}).get("emoji"))
+    title  = _inject_tokens(_clean(ach_row.get("Title"))  or f"{role.name} unlocked!", user=user, role=role, emoji=emoji)
+    body   = _inject_tokens(_clean(ach_row.get("Body"))   or f"{user.mention} just unlocked **{role.name}**.", user=user, role=role, emoji=emoji)
+    footer = _inject_tokens(_clean(ach_row.get("Footer")) or "", user=user, role=role, emoji=emoji)
+    color = _color_from_hex(ach_row.get("ColorHex")) or (role.color if getattr(role.color, "value", 0) else discord.Color.blurple())
+
+    emb = discord.Embed(title=title, description=body, color=color, timestamp=datetime.datetime.utcnow())
+
+    if CFG.get("embed_author_name"):
+        icon = _safe_icon(CFG.get("embed_author_icon"))
+        if icon: emb.set_author(name=CFG["embed_author_name"], icon_url=icon)
+        else:    emb.set_author(name=CFG["embed_author_name"])
+
+    footer_text = footer or CFG.get("embed_footer_text")
+    if footer_text:
+        ficon = _safe_icon(CFG.get("embed_footer_icon"))
+        if ficon: emb.set_footer(text=footer_text, icon_url=ficon)
+        else:     emb.set_footer(text=footer_text)
+
+    hero = resolve_hero_image(guild, role, ach_row)
+    if hero:
+        emb.set_thumbnail(url=hero)  # top-right
+    return emb
+
+def build_group_embed(guild: discord.Guild, user: discord.Member, items: List[Tuple[discord.Role, dict]]) -> discord.Embed:
+    r0, a0 = items[0]
+    color = _color_from_hex(a0.get("ColorHex")) or (r0.color if getattr(r0.color, "value", 0) else discord.Color.blurple())
+    emb = discord.Embed(title=f"{user.display_name} unlocked {len(items)} achievements", color=color, timestamp=datetime.datetime.utcnow())
+
+    if CFG.get("embed_author_name"):
+        icon = _safe_icon(CFG.get("embed_author_icon"))
+        if icon: emb.set_author(name=CFG["embed_author_name"], icon_url=icon)
+        else:    emb.set_author(name=CFG["embed_author_name"])
 
     lines = []
-    lines.append("**Env check**")
-    lines.append("Required:")
-    for k, v in req.items():
-        val_preview = ""
-        if k == "DISCORD_TOKEN":
-            val_preview = f" ({_red(os.getenv(k,''))})"
-        elif k in ("GSHEET_ID",):
-            val_preview = f" ({_red(os.getenv(k,''))})"
-        lines.append(f"• {ok(v)} {k}{val_preview}")
+    for r, a in items:
+        cat = _category_by_key(a.get("category") or "")
+        emoji = resolve_emoji_text(guild, a.get("EmojiNameOrId"), fallback=(cat or {}).get("emoji"))
+        body = _inject_tokens(_clean(a.get("Body")) or f"{user.mention} just unlocked **{r.name}**.", user=user, role=r, emoji=emoji)
+        lines.append(f"• {body}")
+    emb.description = "\n".join(lines)
 
-    lines.append(f"• {ok(sa_ok)} GOOGLE_SERVICE_ACCOUNT_JSON → service account email readable")
+    hero = resolve_hero_image(guild, r0, a0)
+    if hero:
+        emb.set_thumbnail(url=hero)  # top-right
+    footer_text = CFG.get("embed_footer_text")
+    if footer_text:
+        ficon = _safe_icon(CFG.get("embed_footer_icon"))
+        if ficon: emb.set_footer(text=footer_text, icon_url=ficon)
+        else:     emb.set_footer(text=footer_text)
+    return emb
 
-    lines.append("")
-    lines.append("IDs / misc:")
-    lines.append(f"• {ok(bool(notify_id))} NOTIFY_CHANNEL_ID = {notify_id or '(off)'}")
-    lines.append(f"• {ok(True)} NOTIFY_PING_ROLE_ID = {notify_role or '(off)'}")
-    lines.append(f"• {ok(True)} TIMEZONE = {tz}")
-    lines.append(f"• {ok(clan_col >= 1)} CLANLIST_TAG_COLUMN = {clan_col} (1=A, 2=B, …)")
+def build_level_embed(guild: discord.Guild, user: discord.Member, row: dict) -> discord.Embed:
+    emoji = resolve_emoji_text(guild, row.get("EmojiNameOrId"))
+    role_for_tokens = user.top_role if user.top_role else user.guild.default_role
+    title  = _inject_tokens(_clean(row.get("Title"))  or "Level up!", user=user, role=role_for_tokens, emoji=emoji)
+    body   = _inject_tokens(_clean(row.get("Body"))   or "{user} leveled up!", user=user, role=role_for_tokens, emoji=emoji)
+    footer = _inject_tokens(_clean(row.get("Footer")) or "", user=user, role=role_for_tokens, emoji=emoji)
+    color = _color_from_hex(row.get("ColorHex")) or discord.Color.gold()
 
-    lines.append("")
-    lines.append("Toggles:")
-    for k, v in toggles.items():
-        lines.append(f"• {ok(bool(v))} {k} = {'ON' if v else 'OFF'}")
+    emb = discord.Embed(title=title, description=body, color=color, timestamp=datetime.datetime.utcnow())
 
-    hints = []
-    if not req["WELCOME_CHANNEL_ID"] or not req["PROMO_CHANNEL_ID"]:
-        hints.append("set numeric IDs for WELCOME_CHANNEL_ID and PROMO_CHANNEL_ID")
-    if ENABLE_NOTIFY_FALLBACK and not notify_id:
-        hints.append("set NOTIFY_CHANNEL_ID or turn ENABLE_NOTIFY_FALLBACK=OFF")
-    if clan_col != CLANLIST_TAG_COLUMN:
-        hints.append("CLANLIST_TAG_COLUMN didn’t parse as expected")
-    if hints:
-        lines.append("")
-        lines.append("_Hints:_ " + "; ".join(hints))
+    if CFG.get("embed_author_name"):
+        icon = _safe_icon(CFG.get("embed_author_icon"))
+        if icon: emb.set_author(name=CFG["embed_author_name"], icon_url=icon)
+        else:    emb.set_author(name=CFG["embed_author_name"])
 
-    lines.append("")
-    lines.append("_Sheets tip:_ set **column A** (ticket number) to **Plain text** to keep leading zeros.")
-    await ctx.reply("\n".join(lines), mention_author=False)
+    footer_text = footer or CFG.get("embed_footer_text")
+    if footer_text:
+        ficon = _safe_icon(CFG.get("embed_footer_icon"))
+        if ficon: emb.set_footer(text=footer_text, icon_url=ficon)
+        else:     emb.set_footer(text=footer_text)
+    return emb
 
-@bot.command(name="ping")
-@cmd_enabled(ENABLE_CMD_PING)
-async def cmd_ping(ctx): await ctx.reply("🏓 Pong — Live and listening.", mention_author=False)
+# ---------------- grouping buffer ----------------
+GROUP: Dict[int, Dict[int, dict]] = {}
 
-@bot.command(name="sheetstatus")
-@cmd_enabled(ENABLE_CMD_SHEETSTATUS)
-async def cmd_sheetstatus(ctx):
-    email = service_account_email() or "(no service account)"
-    try:
-        ws1 = get_ws(SHEET1_NAME, HEADERS_SHEET1)
-        ws4 = get_ws(SHEET4_NAME, HEADERS_SHEET4)
-        title = ws1.spreadsheet.title
-        await ctx.reply(
-            f"✅ Sheets OK: **{title}**\n• Tabs: `{SHEET1_NAME}`, `{SHEET4_NAME}`, `{CLANLIST_TAB_NAME}` (tags col {CLANLIST_TAG_COLUMN})\n• Share with: `{email}`",
-            mention_author=False
-        )
-    except Exception as e:
-        await ctx.reply(f"⚠️ Cannot open sheet: `{e}`\nShare with: `{email}`", mention_author=False)
+async def _flush_group(guild: discord.Guild, user_id: int):
+    entry = GROUP.get(guild.id, {}).pop(user_id, None)
+    if not entry: return
+    levels_ch = guild.get_channel(CFG["levels_channel_id"]) if CFG["levels_channel_id"] else None
+    if not levels_ch:
+        log.warning("levels_channel_id not configured")
+        return
+    items = entry["items"]
+    user = guild.get_member(user_id) or await guild.fetch_member(user_id)
+    if len(items) == 1:
+        r, ach = items[0]
+        await levels_ch.send(embed=build_achievement_embed(guild, user, r, ach))
+    else:
+        await levels_ch.send(embed=build_group_embed(guild, user, items))
 
-def _render_status() -> str:
-    st = backfill_state; w = st["welcome"]; p = st["promo"]
-    return (
-        f"Running: **{st['running']}** | Last: {st.get('last_msg','')}\n"
-        f"Welcome — scanned: **{w['scanned']}**, added: **{w['added']}**, updated: **{w['updated']}**, skipped: **{w['skipped']}**\n"
-        f"Promo   — scanned: **{p['scanned']}**, added: **{p['added']}**, updated: **{p['updated']}**, skipped: **{p['skipped']}**"
-    )
-
-@bot.command(name="backfill_tickets")
-@cmd_enabled(ENABLE_CMD_BACKFILL)
-async def cmd_backfill(ctx):
-    if backfill_state["running"]:
-        return await ctx.reply("A backfill is already running. Use !backfill_status.", mention_author=False)
-    backfill_state["running"] = True; backfill_state["last_msg"] = ""
-    progress_msg = await ctx.reply("Starting backfill…", mention_author=False)
-
-    async def progress_loop():
-        while backfill_state["running"]:
-            try: await progress_msg.edit(content=_render_status())
-            except Exception: pass
-            await asyncio.sleep(5.0)
-    updater_task = asyncio.create_task(progress_loop())
-
-    try:
-        async def tick():
-            try: await progress_msg.edit(content=_render_status())
-            except Exception: pass
-
-        if ENABLE_WELCOME_SCAN and WELCOME_CHANNEL_ID:
-            ch = bot.get_channel(WELCOME_CHANNEL_ID)
-            if isinstance(ch, discord.TextChannel):
-                await scan_welcome_channel(ch, progress_cb=tick)
-        if ENABLE_PROMO_SCAN and PROMO_CHANNEL_ID:
-            ch2 = bot.get_channel(PROMO_CHANNEL_ID)
-            if isinstance(ch2, discord.TextChannel):
-                await scan_promo_channel(ch2, progress_cb=tick)
-    finally:
-        backfill_state["running"] = False
-        try: updater_task.cancel()
-        except Exception: pass
-
-    await progress_msg.edit(content=_render_status() + "\nDone.")
-
-    if POST_BACKFILL_SUMMARY:
-        w = backfill_state["welcome"]; p = backfill_state["promo"]
-        def _fmt_list(ids: List[str], max_items=10) -> str:
-            if not ids: return "—"
-            show = ids[:max_items]; extra = len(ids) - len(show)
-            return ", ".join(show) + (f" …(+{extra})" if extra>0 else "")
-        msg = (
-            "**Backfill report (top 10 each)**\n"
-            f"**Welcome** added: {len(w['added_ids'])} — {_fmt_list(w['added_ids'])}\n"
-            f"updated: {len(w['updated_ids'])} — {_fmt_list(w['updated_ids'])}\n"
-            f"skipped: {len(w['skipped_ids'])} — {_fmt_list(w['skipped_ids'])}\n"
-            f"**Promo** added: {len(p['added_ids'])} — {_fmt_list(p['added_ids'])}\n"
-            f"updated: {len(p['updated_ids'])} — {_fmt_list(p['updated_ids'])}\n"
-            f"skipped: {len(p['skipped_ids'])} — {_fmt_list(p['skipped_ids'])}\n"
-        )
-        await ctx.send(msg)
-
-    if AUTO_POST_BACKFILL_DETAILS:
-        data = _build_backfill_details_text()
-        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        buf = io.BytesIO(data.encode("utf-8"))
-        await ctx.send(file=discord.File(buf, filename=f"backfill_details_{ts}.txt"))
-
-@bot.command(name="backfill_stop")
-async def cmd_backfill_stop(ctx):
-    if not backfill_state["running"]:
-        return await ctx.reply("No backfill is running.", mention_author=False)
-    backfill_state["running"] = False
-    backfill_state["last_msg"] = "cancel requested"
-    await ctx.reply("Stopping backfill… will halt after the current thread.", mention_author=False)
-
-@bot.command(name="backfill_details")
-async def cmd_backfill_details(ctx: commands.Context):
-    data = _build_backfill_details_text()
-    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    buf = io.BytesIO(data.encode("utf-8"))
-    await ctx.reply(file=discord.File(buf, filename=f"backfill_details_{ts}.txt"), mention_author=False)
-
-@bot.command(name="clan_tags_debug")
-async def cmd_clan_tags_debug(ctx):
-    tags = _load_clan_tags(force=True)
-    norm_set = { _normalize_dashes(t).upper() for t in tags }
-    has_fit = "F-IT" in norm_set
-    sample = ", ".join(list(tags)[:20]) or "(none)"
-    await ctx.reply(
-        f"Loaded {len(tags)} clan tags from column {CLANLIST_TAG_COLUMN}. Has F-IT: {has_fit}\nSample: {sample}",
-        mention_author=False
-    )
-
-@bot.command(name="dedupe_sheet")
-@cmd_enabled(ENABLE_CMD_DEDUPE)
-async def cmd_dedupe(ctx):
-    try:
-        ws1 = get_ws(SHEET1_NAME, HEADERS_SHEET1)
-        ws4 = get_ws(SHEET4_NAME, HEADERS_SHEET4)
-        kept1, deleted1 = dedupe_sheet(SHEET1_NAME, ws1, has_type=False)
-        kept4, deleted4 = dedupe_sheet(SHEET4_NAME, ws4, has_type=True)
-        await ctx.reply(
-            f"Sheet1: kept **{kept1}** unique tickets, deleted **{deleted1}** dupes.\n"
-            f"Sheet4: kept **{kept4}** unique (ticket+type+created), deleted **{deleted4}** dupes.",
-            mention_author=False
-        )
-    except Exception as e:
-        await ctx.reply(f"Dedup failed: `{e}`", mention_author=False)
-
-@bot.command(name="reload")
-@cmd_enabled(ENABLE_CMD_RELOAD)
-async def cmd_reload(ctx):
-    _ws_cache.clear(); _index_simple.clear(); _index_promo.clear()
-    global _gs_client, _clan_tags_cache, _clan_tags_norm_set, _last_clan_fetch, _tag_regex_cache
-    _gs_client = None; _clan_tags_cache = []; _clan_tags_norm_set = set(); _last_clan_fetch = 0.0; _tag_regex_cache=None
-    await ctx.reply("Caches cleared. Reconnect to Sheets on next use.", mention_author=False)
-
-@bot.command(name="health")
-@cmd_enabled(ENABLE_CMD_HEALTH)
-async def cmd_health(ctx):
-    lat = int(bot.latency*1000)
-    try:
-        ws1 = get_ws(SHEET1_NAME, HEADERS_SHEET1)
-        ok = f"🟢 OK ({ws1.title})"
-    except Exception:
-        ok = "🔴 FAILED"
-    await ctx.reply(f"🟢 Bot OK | Latency: {lat} ms | Sheets: {ok} | Uptime: {uptime_str()}", mention_author=False)
-
-@bot.command(name="checksheet")
-@cmd_enabled(ENABLE_CMD_CHECKSHEET)
-async def cmd_checksheet(ctx):
-    try:
-        ws1 = get_ws(SHEET1_NAME, HEADERS_SHEET1)
-        ws4 = get_ws(SHEET4_NAME, HEADERS_SHEET4)
-        await ctx.reply(
-            f"{SHEET1_NAME} rows: {len(ws1.col_values(1))} | {SHEET4_NAME} rows: {len(ws4.col_values(1))}",
-            mention_author=False
-        )
-    except Exception as e:
-        await ctx.reply(f"checksheet failed: `{e}`", mention_author=False)
-
-@bot.command(name="reboot")
-@cmd_enabled(ENABLE_CMD_REBOOT)
-async def cmd_reboot(ctx):
-    await ctx.reply("Rebooting…", mention_author=False)
-    await asyncio.sleep(1.0); os._exit(0)
-
-@bot.command(name="watch_status")
-async def cmd_watch_status(ctx):
-    await ctx.reply(render_watch_status_text(), mention_author=False)
-
-# --- Clan Tag Picker (timeout UX: reload button + type fallback, no re-ping) --
-def _chunks(seq, n):
-    for i in range(0, len(seq), n):
-        yield seq[i:i+n]
-
-class TagPickerReloadView(discord.ui.View):
-    """Shown after timeout; lets a recruiter reload the picker (no re-ping)."""
-    def __init__(self, original: "TagPickerView"):
-        super().__init__(timeout=600)
-        self.original = original
-
-    @discord.ui.button(label="Reload picker", style=discord.ButtonStyle.primary, emoji="🔄")
-    async def reload(self, interaction: discord.Interaction, button: discord.ui.Button):
-        pending = (_pending_welcome if self.original.mode == "welcome" else _pending_promo)
-        if self.original.thread.id not in pending:
-            await interaction.response.edit_message(content="Already logged — picker closed.", view=None)
-            return
-        new_view = TagPickerView(
-            self.original.mode,
-            self.original.thread,
-            self.original.ticket,
-            self.original.username,
-            self.original.tags
-        )
-        await interaction.response.edit_message(
-            content=(f"Which clan tag for **{self.original.username}** (ticket **{self.original.ticket}**)?\n"
-                     "Pick one from the menu below, or simply type the tag as a message."),
-            view=new_view
-        )
-        new_view.message = interaction.message
-
-class TagPickerView(discord.ui.View):
-    """Dropdown tag picker. mode ∈ {'welcome','promo'}."""
-    def __init__(self, mode: str, thread: discord.Thread, ticket: str, username: str,
-                 tags: List[str]):
-        super().__init__(timeout=600)
-        self.mode = mode
-        self.thread = thread
-        self.ticket = _fmt_ticket(ticket)
-        self.username = username
-        self.tags = [t.strip().upper() for t in tags if t and t.strip()]
-        self.pages = list(_chunks(self.tags, 25)) or [[]]
-        self.page  = 0
-        self.message: Optional[discord.Message] = None
-
-        # Dropdown
-        self.select = discord.ui.Select(
-            placeholder=f"Choose clan tag • Page 1/{len(self.pages)}",
-            min_values=1, max_values=1,
-            options=[discord.SelectOption(label=t, value=t) for t in self.pages[0]]
-        )
-        async def _on_select(interaction: discord.Interaction):
-            tag = self.select.values[0]
-            await self._handle_pick(interaction, tag)
-        self.select.callback = _on_select
-        self.add_item(self.select)
-
-        # Pager if >25 options
-        if len(self.pages) > 1:
-            prev_btn = discord.ui.Button(label="◀ Prev", style=discord.ButtonStyle.secondary)
-            next_btn = discord.ui.Button(label="Next ▶", style=discord.ButtonStyle.secondary)
-
-            async def _prev_cb(interaction: discord.Interaction):
-                self.page = (self.page - 1) % len(self.pages)
-                self._refresh()
-                await interaction.response.edit_message(view=self)
-
-            async def _next_cb(interaction: discord.Interaction):
-                self.page = (self.page + 1) % len(self.pages)
-                self._refresh()
-                await interaction.response.edit_message(view=self)
-
-            prev_btn.callback = _prev_cb
-            next_btn.callback = _next_cb
-            self.add_item(prev_btn); self.add_item(next_btn)
-
-    def _refresh(self):
-        self.select.options = [discord.SelectOption(label=t, value=t) for t in self.pages[self.page]]
-        self.select.placeholder = f"Choose clan tag • Page {self.page+1}/{len(self.pages)}"
-
-    async def _handle_pick(self, interaction: discord.Interaction, tag: str):
-        pending = (_pending_welcome if self.mode == "welcome" else _pending_promo)
-        info = pending.get(self.thread.id) or {}
-        ticket   = info.get("ticket", self.ticket)
-        username = info.get("username", self.username)
-        close_dt = info.get("close_dt")
-
-        pending.pop(self.thread.id, None)
-
-        if self.mode == "welcome":
-            await _finalize_welcome(self.thread, ticket, username, tag, close_dt)
-        else:
-            await _finalize_promo(self.thread, ticket, username, tag, close_dt)
-
-        for item in self.children:
-            item.disabled = True
-        await interaction.response.edit_message(
-            content=f"Got it — set clan tag to **{tag}** and logged to the sheet. ✅",
-            view=self
-        )
-
-    async def on_timeout(self):
-        """Expire quietly, offer reload, suggest typing the tag. No re-ping."""
-        pending = (_pending_welcome if self.mode == "welcome" else _pending_promo)
-        if self.thread.id not in pending:
-            return
+def _buffer_item(guild: discord.Guild, user_id: int, role: discord.Role, ach: dict):
+    g = GROUP.setdefault(guild.id, {})
+    e = g.get(user_id)
+    if not e:
+        e = g[user_id] = {"items": [], "task": None}
+    e["items"].append((role, ach))
+    if e["task"]:
+        e["task"].cancel()
+    async def _delay():
         try:
-            for item in self.children:
-                item.disabled = True
-            note = "⏳ Tag picker expired. You can **Reload picker** below, or just type the tag."
-            if self.message:
-                await self.message.edit(content=note, view=TagPickerReloadView(self))
+            await asyncio.sleep(CFG["group_window_seconds"])
+            await _flush_group(guild, user_id)
+        except asyncio.CancelledError:
+            pass
+    e["task"] = asyncio.create_task(_delay())
+
+# ---------------- GK Review views ----------------
+class TryAgainView(discord.ui.View):
+    def __init__(self, owner_id: int, att: Optional[discord.Attachment], claim_id: int):
+        super().__init__(timeout=600)
+        self.owner_id = owner_id
+        self.att = att
+        self.claim_id = claim_id
+
+    async def interaction_check(self, itx: discord.Interaction) -> bool:
+        if itx.user.id != self.owner_id:
+            await itx.response.send_message("This belongs to someone else. Upload your own screenshot to claim.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Try again", style=discord.ButtonStyle.primary)
+    async def try_again(self, itx: discord.Interaction, _btn: discord.ui.Button):
+        await show_category_picker(itx, self.att, claim_id=self.claim_id)
+
+class GKReview(discord.ui.View):
+    def __init__(self, claimant_id: int, ach_key: str, att: Optional[discord.Attachment], claim_id: int):
+        super().__init__(timeout=1800)
+        self.claimant_id = claimant_id
+        self.ach_key = ach_key
+        self.att = att
+        self.claim_id = claim_id
+
+    async def _only_gk(self, itx: discord.Interaction) -> bool:
+        rid = CFG.get("guardian_knights_role_id")
+        mem = itx.guild.get_member(itx.user.id)
+        if not rid or not mem or not any(r.id == rid for r in mem.roles):
+            await itx.response.send_message("Guardian Knights only.", ephemeral=True)
+            return False
+        return True
+
+    async def _only_claimant(self, itx: discord.Interaction) -> bool:
+        if itx.user.id != self.claimant_id:
+            await itx.response.send_message("Only the claimant can cancel this request.", ephemeral=True)
+            return False
+        return True
+
+    def _disable_all(self):
+        for c in self.children:
+            c.disabled = True
+
+    @discord.ui.button(label="Approve", style=discord.ButtonStyle.success)
+    async def approve(self, itx: discord.Interaction, _btn: discord.ui.Button):
+        if not await self._only_gk(itx): return
+        await itx.response.defer()
+        await finalize_grant(itx.guild, self.claimant_id, self.ach_key)
+        try:
+            await itx.message.edit(content="**Approved.**", view=None)
         except Exception:
             pass
 
-# ---------- LIVE WATCHERS ----------
-_pending_welcome: Dict[int, Dict[str, Any]] = {}  # thread_id -> {ticket, username, close_dt}
-_pending_promo:   Dict[int, Dict[str, Any]] = {}
+    @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger)
+    async def deny(self, itx: discord.Interaction, _btn: discord.ui.Button):
+        if not await self._only_gk(itx): return
+        reason = REASONS.get("NEED_BANNER", "Proof unclear. Please include the full result banner.")
+        try:
+            await itx.message.edit(
+                content=f"**Not approved.** Reason: **{reason}**\nPost a clearer screenshot and hit **Try Again**.",
+                view=TryAgainView(self.claimant_id, self.att, claim_id=self.claim_id)
+            )
+        except Exception:
+            pass
 
-def _is_thread_in_parent(thread: discord.Thread, parent_id: int) -> bool:
+    @discord.ui.button(label="Grant different role…", style=discord.ButtonStyle.secondary)
+    async def grant_other(self, itx: discord.Interaction, _btn: discord.ui.Button):
+        if not await self._only_gk(itx): return
+        opts = [discord.SelectOption(label=a["display_name"], value=a["key"]) for a in ACHIEVEMENTS.values()]
+        v = discord.ui.View(timeout=600)
+        sel = discord.ui.Select(placeholder="Pick a role to grant instead…", options=opts)
+
+        async def _on_pick(sel_itx: discord.Interaction):
+            if not await self._only_gk(sel_itx): return
+            key = sel_itx.data["values"][0]
+            await sel_itx.response.defer()
+            await finalize_grant(sel_itx.guild, self.claimant_id, key)
+            try:
+                await itx.message.edit(content="**Approved with different role.**", view=None)
+            except Exception:
+                pass
+
+        sel.callback = _on_pick
+        v.add_item(sel)
+        await itx.response.send_message("Choose replacement role:", view=v, ephemeral=True)
+
+    @discord.ui.button(label="Cancel request", style=discord.ButtonStyle.danger)
+    async def cancel_req(self, itx: discord.Interaction, _btn: discord.ui.Button):
+        if not await self._only_claimant(itx): return
+        await itx.response.defer()
+        try:
+            await itx.message.delete()
+        except Exception:
+            self._disable_all()
+            try:
+                await itx.message.edit(
+                    content=f"**Claim canceled by {itx.user.mention}.** No action needed.",
+                    view=self
+                )
+            except Exception:
+                pass
+
+# ---------------- Pickers with claim-state awareness ----------------
+class BaseView(discord.ui.View):
+    def __init__(self, owner_id: int, claim_id: int, timeout=600, announce: bool = False):
+        super().__init__(timeout=timeout)
+        self.owner_id = owner_id
+        self.claim_id = claim_id     # id of the FIRST prompt message
+        self.announce = announce     # only the first prompt sets this True
+        self.message: Optional[discord.Message] = None
+
+    async def on_timeout(self):
+        # only first prompt may announce, and only if claim is still open
+        if not self.announce:
+            return
+        if CLAIM_STATE.get(self.claim_id) != "open":
+            return
+        CLAIM_STATE[self.claim_id] = "expired"
+        try:
+            if self.message:
+                await self.message.channel.send(
+                    f"**Claim expired for <@{self.owner_id}>.** No action needed."
+                )
+        except Exception:
+            pass
+
+    async def interaction_check(self, itx: discord.Interaction) -> bool:
+        if itx.user.id != self.owner_id:
+            await itx.response.send_message("This claim belongs to someone else. Please upload your own screenshot.", ephemeral=True)
+            return False
+        return True
+
+class MultiImageChoice(BaseView):
+    def __init__(self, owner_id: int, atts: List[discord.Attachment], claim_id: int, announce: bool = False):
+        super().__init__(owner_id, claim_id, announce=announce)
+        self.atts = [a for a in atts if _is_image(a)]
+
+    @discord.ui.button(label="Use first", style=discord.ButtonStyle.primary)
+    async def use_first(self, itx: discord.Interaction, _btn: discord.ui.Button):
+        await show_category_picker(itx, self.atts[0], claim_id=self.claim_id)
+
+    @discord.ui.button(label="Choose image", style=discord.ButtonStyle.secondary)
+    async def choose_image(self, itx: discord.Interaction, _btn: discord.ui.Button):
+        view = ImageSelect(self.owner_id, self.atts, self.claim_id)
+        await itx.response.edit_message(content="Pick one screenshot:", view=view)
+        view.message = await itx.edit_original_response()
+
+    @discord.ui.button(label="Use all", style=discord.ButtonStyle.success)
+    async def use_all(self, itx: discord.Interaction, _btn: discord.ui.Button):
+        await itx.response.edit_message(content=f"Apply one achievement to all **{len(self.atts)}** screenshots from this post. Pick the achievement once.", view=None)
+        await show_category_picker(itx, None, batch_list=self.atts, claim_id=self.claim_id)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
+    async def cancel(self, itx: discord.Interaction, _btn: discord.ui.Button):
+        try:
+            await itx.message.delete()
+        except Exception:
+            pass
+        CLAIM_STATE[self.claim_id] = "canceled"
+        self.stop()
+        await itx.channel.send(f"**Claim canceled by {itx.user.mention}.** No action needed.")
+
+class ImageSelect(BaseView):
+    def __init__(self, owner_id: int, atts: List[discord.Attachment], claim_id: int, announce: bool = False):
+        super().__init__(owner_id, claim_id, announce=announce)
+        self.atts = atts
+        opts = [discord.SelectOption(label=f"#{i} – {a.filename}", value=str(i-1)) for i,a in enumerate(atts, start=1)]
+        sel = discord.ui.Select(placeholder="Choose a screenshot…", options=opts)
+        sel.callback = self._on_pick
+        self.add_item(sel)
+
+    async def _on_pick(self, itx: discord.Interaction):
+        idx = int(itx.data["values"][0])
+        await show_category_picker(itx, self.atts[idx], claim_id=self.claim_id)
+
+class CategoryPicker(BaseView):
+    def __init__(self, owner_id: int, att: Optional[discord.Attachment],
+                 batch_list: Optional[List[discord.Attachment]], claim_id: int, announce: bool = False):
+        super().__init__(owner_id, claim_id, announce=announce)
+        self.att = att
+        self.batch = batch_list
+        for c in [c for c in CATEGORIES if _truthy(c.get("enabled", True))]:
+            btn = discord.ui.Button(label=c["label"], style=discord.ButtonStyle.primary, custom_id=f"cat::{c['category']}")
+            btn.callback = partial(self._pick_cat, cat_key=c["category"])
+            self.add_item(btn)
+        cancel = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.danger)
+        cancel.callback = self._cancel
+        self.add_item(cancel)
+
+    async def _cancel(self, itx: discord.Interaction):
+        try: await itx.message.delete()
+        except Exception: pass
+        CLAIM_STATE[self.claim_id] = "canceled"
+        self.stop()
+        await itx.channel.send(f"**Claim canceled by {itx.user.mention}.** No action needed.")
+
+    async def _pick_cat(self, itx: discord.Interaction, cat_key: str):
+        await show_role_picker(itx, cat_key, self.att, self.batch, claim_id=self.claim_id)
+
+class RolePicker(BaseView):
+    def __init__(self, owner_id: int, cat_key: str, att: Optional[discord.Attachment],
+                 batch_list: Optional[List[discord.Attachment]], claim_id: int, announce: bool = False):
+        super().__init__(owner_id, claim_id, announce=announce)
+        self.cat_key = cat_key
+        self.att = att
+        self.batch = batch_list
+        achs = [a for a in ACHIEVEMENTS.values() if a.get("category")==cat_key]
+        opts = [discord.SelectOption(label=a["display_name"], value=a["key"]) for a in achs]
+        sel = discord.ui.Select(placeholder="Choose the exact achievement…", options=opts)
+        sel.callback = self._on_pick
+        self.add_item(sel)
+        back = discord.ui.Button(label="Back", style=discord.ButtonStyle.secondary)
+        back.callback = self._back
+        self.add_item(back)
+        cancel = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.danger)
+        cancel.callback = self._cancel
+        self.add_item(cancel)
+
+    async def _back(self, itx: discord.Interaction):
+        await show_category_picker(itx, self.att, self.batch, claim_id=self.claim_id)
+
+    async def _cancel(self, itx: discord.Interaction):
+        try: await itx.message.delete()
+        except Exception: pass
+        CLAIM_STATE[self.claim_id] = "canceled"
+        self.stop()
+        await itx.channel.send(f"**Claim canceled by {itx.user.mention}.** No action needed.")
+
+    async def _on_pick(self, itx: discord.Interaction):
+        await itx.response.defer()
+        key = itx.data["values"][0]
+        await process_claim(itx, key, self.att, self.batch, claim_id=self.claim_id)
+
+# ---------------- Flow helpers ----------------
+async def show_category_picker(itx: discord.Interaction, attachment: Optional[discord.Attachment],
+                               batch_list: Optional[List[discord.Attachment]] = None, claim_id: int = 0):
+    v = CategoryPicker(itx.user.id, attachment, batch_list=batch_list, claim_id=claim_id)
     try:
-        return thread and thread.parent_id == parent_id
-    except Exception:
-        return False
+        await itx.response.edit_message(content="**Claim your achievement** — tap a category:", view=v)
+        v.message = await itx.edit_original_response()
+    except discord.InteractionResponded:
+        m = await itx.followup.send("**Claim your achievement** — tap a category:", view=v)
+        v.message = m
 
+async def show_role_picker(itx: discord.Interaction, cat_key: str, attachment: Optional[discord.Attachment],
+                           batch_list: Optional[List[discord.Attachment]] = None, claim_id: int = 0):
+    v = RolePicker(itx.user.id, cat_key, attachment, batch_list, claim_id=claim_id)
+    try:
+        await itx.response.edit_message(content=f"**{cat_key}** — choose the exact achievement:", view=v)
+        v.message = await itx.edit_original_response()
+    except discord.InteractionResponded:
+        m = await itx.followup.send(f"**{cat_key}** — choose the exact achievement:", view=v)
+        v.message = m
+
+# ---------------- Claim processing ----------------
+async def finalize_grant(guild: discord.Guild, user_id: int, ach_key: str):
+    ach = ACHIEVEMENTS.get(ach_key)
+    if not ach: return
+    role = _get_role_by_config(guild, ach)
+    if not role: return
+    member = guild.get_member(user_id) or await guild.fetch_member(user_id)
+    if role in member.roles: return
+    await member.add_roles(role, reason=f"claim:{ach_key}")
+
+    if CFG.get("audit_log_channel_id"):
+        ch = guild.get_channel(CFG["audit_log_channel_id"])
+        if ch:
+            emb = discord.Embed(
+                title="Achievement Claimed",
+                description=f"**User:** {member.mention}\n**Role:** {role.mention}\n**Key:** `{ach_key}`",
+                color=discord.Color.green(),
+                timestamp=datetime.datetime.utcnow()
+            )
+            await ch.send(embed=emb)
+
+    _buffer_item(guild, user_id, role, ach)
+
+async def process_claim(itx: discord.Interaction, ach_key: str,
+                        att: Optional[discord.Attachment],
+                        batch_list: Optional[List[discord.Attachment]],
+                        claim_id: int):
+    # progress → suppress any future expiry
+    if claim_id:
+        CLAIM_STATE[claim_id] = "closed"
+
+    guild = itx.guild
+    ach = ACHIEVEMENTS.get(ach_key)
+    if not ach:
+        await itx.followup.send("Unknown achievement.", ephemeral=True)
+        return
+    role = _get_role_by_config(guild, ach)
+    if not role:
+        await itx.followup.send("Role not configured. Ping an admin.", ephemeral=True)
+        return
+
+    mode = (ach.get("mode") or "AUTO_GRANT").upper()
+
+    async def _one(a: Optional[discord.Attachment]):
+        if a:
+            if not _is_image(a):
+                await itx.channel.send(f"**Not processed for {itx.user.mention}.** Reason: wrong file type.")
+                return
+            if a.size and a.size > CFG["max_file_mb"] * 1024 * 1024:
+                await itx.channel.send(f"**Not processed for {itx.user.mention}.** Reason: file too large.")
+                return
+
+        if mode == "AUTO_GRANT":
+            await finalize_grant(guild, itx.user.id, ach_key)
+            await itx.channel.send(f"✨ **{role.name}** unlocked for {itx.user.mention}!")
+            return
+
+        rid = CFG.get("guardian_knights_role_id")
+        ping = f"<@&{rid}>" if rid else "**Guardian Knights**"
+        emb = discord.Embed(
+            title="Verification needed",
+            description=f"{itx.user.mention} requested **{role.name}**",
+            color=discord.Color.orange(),
+            timestamp=datetime.datetime.utcnow(),
+        )
+        thumb = resolve_hero_image(guild, role, ach)
+        if thumb: emb.set_thumbnail(url=thumb)
+        v = GKReview(itx.user.id, ach_key, a, claim_id=claim_id)
+        await itx.channel.send(content=f"{ping}, please review.", embed=emb, view=v)
+
+    if batch_list:
+        for a in batch_list:
+            await _one(a)
+    else:
+        await _one(att)
+
+# ---------------- staff guard ----------------
+def _is_staff(member: discord.Member) -> bool:
+    if member.guild_permissions.manage_guild:
+        return True
+    rid = CFG.get("guardian_knights_role_id")
+    return bool(rid and any(r.id == rid for r in member.roles))
+
+# ---------------- admin/test commands ----------------
+@bot.command(name="testconfig")
+async def testconfig(cmdx: commands.Context):
+    if not _is_staff(cmdx.author):
+        return await cmdx.send("Staff only.")
+
+    thread_txt = await _fmt_chan_or_thread(cmdx.guild, CFG.get("public_claim_thread_id"))
+    levels_txt = await _fmt_chan_or_thread(cmdx.guild, CFG.get("levels_channel_id"))
+    audit_txt  = await _fmt_chan_or_thread(cmdx.guild, CFG.get("audit_log_channel_id"))
+    gk_txt     = _fmt_role(cmdx.guild, CFG.get("guardian_knights_role_id"))
+    loaded_at = CONFIG_META["loaded_at"].strftime("%Y-%m-%d %H:%M:%S UTC") if CONFIG_META["loaded_at"] else "—"
+
+    emb = discord.Embed(title="Current configuration", color=discord.Color.blurple())
+    if CFG.get("embed_author_name"):
+        icon = _safe_icon(CFG.get("embed_author_icon"))
+        if icon: emb.set_author(name=CFG["embed_author_name"], icon_url=icon)
+        else:    emb.set_author(name=CFG["embed_author_name"])
+    emb.add_field(name="Claims thread", value=thread_txt, inline=False)
+    emb.add_field(name="Levels channel", value=levels_txt, inline=False)
+    emb.add_field(name="Audit-log channel", value=audit_txt, inline=False)
+    emb.add_field(name="Guardian Knights role", value=gk_txt, inline=False)
+    emb.add_field(name="Source", value=f"{CONFIG_META['source']} — {loaded_at}", inline=False)
+    emb.add_field(
+        name="Loaded rows",
+        value=f"Achievements: **{len(ACHIEVEMENTS)}**\nCategories: **{len(CATEGORIES)}**\nLevels: **{len(LEVELS)}**",
+        inline=False,
+    )
+    await safe_send_embed(cmdx, emb)
+
+@bot.command(name="configstatus")
+async def configstatus(ctx: commands.Context):
+    if not _is_staff(ctx.author):
+        return await ctx.send("Staff only.")
+    loaded_at = CONFIG_META["loaded_at"].strftime("%Y-%m-%d %H:%M:%S UTC") if CONFIG_META["loaded_at"] else "—"
+    await ctx.send(f"Source: **{CONFIG_META['source']}** | Loaded: **{loaded_at}** | Ach={len(ACHIEVEMENTS)} Cat={len(CATEGORIES)} Lvls={len(LEVELS)}")
+
+@bot.command(name="reloadconfig")
+async def reloadconfig(ctx: commands.Context):
+    if not _is_staff(ctx.author):
+        return await ctx.send("Staff only.")
+    try:
+        load_config()
+        loaded_at = CONFIG_META["loaded_at"].strftime("%Y-%m-%d %H:%M:%S UTC")
+        await ctx.send(f"🔁 Reloaded from **{CONFIG_META['source']}** at **{loaded_at}**. Ach={len(ACHIEVEMENTS)} Cat={len(CATEGORIES)} Lvls={len(LEVELS)}")
+    except Exception as e:
+        await ctx.send(f"Reload failed: `{e}`")
+
+@bot.command(name="listach")
+async def listach(ctx: commands.Context, filter_text: str = ""):
+    if not _is_staff(ctx.author):
+        return await ctx.send("Staff only.")
+    keys = sorted(ACHIEVEMENTS.keys())
+    if filter_text:
+        f = filter_text.lower()
+        keys = [k for k in keys if f in k.lower() or f in (ACHIEVEMENTS[k].get("display_name","").lower())]
+    if not keys:
+        return await ctx.send("No achievements match.")
+    chunk = ", ".join(keys[:60])
+    await ctx.send(f"**Loaded achievements ({len(keys)}):** {chunk}{' …' if len(keys) > 60 else ''}")
+
+@bot.command(name="findach")
+async def findach(ctx: commands.Context, *, text: str):
+    if not _is_staff(ctx.author):
+        return await ctx.send("Staff only.")
+    t = text.lower()
+    hits = []
+    for k, r in ACHIEVEMENTS.items():
+        hay = " ".join([(r.get("key","") or ""), (r.get("display_name","") or ""), (r.get("category","") or ""), (r.get("Title","") or ""), (r.get("Body","") or "")]).lower()
+        if t in hay:
+            hits.append(f"`{k}` — {r.get('display_name','')}")
+    if not hits:
+        return await ctx.send("No matches.")
+    await ctx.send("\n".join(hits[:20]))
+
+@bot.command(name="testach")
+async def testach(ctx: commands.Context, key: str, where: Optional[str] = None):
+    if not _is_staff(ctx.author):
+        return await ctx.send("Staff only.")
+    ach = ACHIEVEMENTS.get(key)
+    if not ach:
+        close = [k for k in ACHIEVEMENTS.keys() if key.lower() in k.lower()]
+        hint = ", ".join(close[:10]) or "no similar keys"
+        return await ctx.send(f"Unknown achievement key `{key}`. Try: {hint}")
+    role = _get_role_by_config(ctx.guild, ach) or ctx.guild.default_role
+    emb = build_achievement_embed(ctx.guild, ctx.author, role, ach)
+    target = _resolve_target_channel(ctx, where)
+    await safe_send_embed(target, emb)
+    if target.id != ctx.channel.id:
+        await ctx.reply(f"Preview sent to {target.mention}", mention_author=False)
+
+@bot.command(name="testlevel")
+async def testlevel(ctx: commands.Context, *, args: str = ""):
+    if not _is_staff(ctx.author):
+        return await ctx.send("Staff only.")
+    parts = args.rsplit(" ", 1) if args else []
+    query = parts[0] if parts else ""
+    where = parts[1] if len(parts) == 2 else None
+    row = None
+    if query:
+        q = query.lower()
+        for r in LEVELS:
+            hay = (r.get("level_key","") + " " + r.get("Title","") + " " + r.get("Body","")).lower()
+            if q in hay:
+                row = r; break
+    row = row or (LEVELS[0] if LEVELS else None)
+    if not row:
+        return await ctx.send("No Levels rows loaded.")
+    emb = build_level_embed(ctx.guild, ctx.author, row)
+    target = _resolve_target_channel(ctx, where)
+    await safe_send_embed(target, emb)
+    if target.id != ctx.channel.id:
+        await ctx.reply(f"Preview sent to {target.mention}", mention_author=False)
+
+@bot.command(name="ping")
+async def ping(ctx: commands.Context):
+    await ctx.send("✅ Live and listening.")
+
+# ---------------- error reporter ----------------
 @bot.event
-async def on_thread_create(thread: discord.Thread):
-    # Auto-join new threads in our target channels (even if not pinged)
+async def on_command_error(ctx: commands.Context, error: Exception):
+    if isinstance(error, commands.CommandNotFound):
+        return
     try:
-        if thread.parent_id in {WELCOME_CHANNEL_ID, PROMO_CHANNEL_ID}:
-            await thread.join()
+        await ctx.send(f"⚠️ **{type(error).__name__}**: `{error}`")
+    except Exception:
+        pass
+    tb = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    log.error("Command error:\n%s", tb)
+
+# ---------------- message listener ----------------
+@bot.event
+async def on_message(msg: discord.Message):
+    if msg.author.bot:
+        return
+    await bot.process_commands(msg)
+
+    # Levels auto-response (optional)
+    try:
+        for row in LEVELS:
+            trig = row.get("trigger_contains") or row.get("Title") or ""
+            if trig and trig in msg.content:
+                user = msg.mentions[0] if msg.mentions else msg.author
+                ch = msg.guild.get_channel(CFG["levels_channel_id"]) if CFG["levels_channel_id"] else None
+                if ch:
+                    await ch.send(embed=build_level_embed(msg.guild, user, row))
+                break
     except Exception:
         pass
 
-@bot.event
-async def on_message(message: discord.Message):
-    # Only handle thread messages for watchers (commands still processed at end)
-    if isinstance(message.channel, discord.Thread):
-        th = message.channel
+    # Claims only in configured thread
+    if not CFG.get("public_claim_thread_id") or msg.channel.id != CFG.get("public_claim_thread_id"):
+        return
+    images = [a for a in msg.attachments if _is_image(a)]
+    if not images:
+        return
 
-        # If mentioned, join to ensure we can speak
-        if th.parent_id in {WELCOME_CHANNEL_ID, PROMO_CHANNEL_ID}:
-            if bot.user and bot.user.mentioned_in(message):
-                try: await th.join()
-                except Exception: pass
+    if len(images) == 1:
+        view = CategoryPicker(msg.author.id, images[0], batch_list=None, claim_id=0, announce=True)
+        m = await msg.reply(
+            "**Claim your achievement**\nTap a category to continue. (Only you can use these buttons.)",
+            view=view, mention_author=False)
+        view.message = m
+        view.claim_id = m.id
+        CLAIM_STATE[m.id] = "open"
+    else:
+        view = MultiImageChoice(msg.author.id, images, claim_id=0, announce=True)
+        m = await msg.reply(
+            f"**I found {len(images)} screenshots. What do you want to do?**",
+            view=view, mention_author=False)
+        view.message = m
+        view.claim_id = m.id
+        CLAIM_STATE[m.id] = "open"
 
-        # WELCOME watcher
-        if ENABLE_LIVE_WATCH and ENABLE_LIVE_WATCH_WELCOME and _is_thread_in_parent(th, WELCOME_CHANNEL_ID):
-            text = _aggregate_msg_text(message).lower()
-            if "ticket closed by" in text:
-                parsed = parse_welcome_thread_name_allow_missing(th.name or "")
-                if parsed:
-                    ticket, username, tag = parsed
-                    close_dt = message.created_at
-                    log_action("welcome", "close_detected", ticket=_fmt_ticket(ticket), username=username, clantag=tag or "", link=thread_link(th))
-                    if tag:
-                        await _finalize_welcome(th, ticket, username, tag, close_dt)
-                    else:
-                        _pending_welcome[th.id] = {"ticket": ticket, "username": username, "close_dt": close_dt}
-                        await _prompt_for_tag(th, ticket, username, message, mode="welcome")
-                        log_action("welcome", "prompt_sent", ticket=_fmt_ticket(ticket), username=username, link=thread_link(th))
-            elif th.id in _pending_welcome:
-                if not message.author.bot:
-                    tag = _match_tag_in_text(_aggregate_msg_text(message))
-                    if tag:
-                        info = _pending_welcome.pop(th.id, {})
-                        ticket = info.get("ticket"); username = info.get("username"); close_dt = info.get("close_dt")
-                        if ticket and username:
-                            log_action("welcome", "tag_received", ticket=_fmt_ticket(ticket), clantag=tag, link=thread_link(th))
-                            await _finalize_welcome(th, ticket, username, tag, close_dt)
-                            try:
-                                await th.send(f"Got it — set clan tag to **{tag}** and logged to the sheet. ✅")
-                            except Exception:
-                                pass
+# ---------------- startup ----------------
+async def _auto_refresh_loop(minutes: int):
+    while True:
+        try:
+            await asyncio.sleep(minutes * 60)
+            load_config()
+            log.info(f"Auto-refreshed config from {CONFIG_META['source']} at {CONFIG_META['loaded_at']}")
+        except Exception:
+            log.exception("Auto-refresh failed")
 
-        # PROMO watcher
-        if ENABLE_LIVE_WATCH and ENABLE_LIVE_WATCH_PROMO and _is_thread_in_parent(th, PROMO_CHANNEL_ID):
-            text = _aggregate_msg_text(message).lower()
-            if "ticket closed by" in text:
-                parsed = parse_promo_thread_name(th.name or "")
-                if parsed:
-                    ticket, username, tag = parsed
-                    close_dt = message.created_at
-                    log_action("promo", "close_detected", ticket=_fmt_ticket(ticket), username=username, clantag=tag or "", link=thread_link(th))
-                    if tag:
-                        await _finalize_promo(th, ticket, username, tag, close_dt)
-                    else:
-                        _pending_promo[th.id] = {"ticket": ticket, "username": username, "close_dt": close_dt}
-                        await _prompt_for_tag(th, ticket, username, message, mode="promo")
-                        log_action("promo", "prompt_sent", ticket=_fmt_ticket(ticket), username=username, link=thread_link(th))
-            elif th.id in _pending_promo:
-                if not message.author.bot:
-                    tag = _match_tag_in_text(_aggregate_msg_text(message))
-                    if tag:
-                        info = _pending_promo.pop(th.id, {})
-                        ticket = info.get("ticket"); username = info.get("username"); close_dt = info.get("close_dt")
-                        if ticket and username:
-                            log_action("promo", "tag_received", ticket=_fmt_ticket(ticket), clantag=tag, link=thread_link(th))
-                            await _finalize_promo(th, ticket, username, tag, close_dt)
-                            try:
-                                await th.send(f"Got it — set clan tag to **{tag}** and logged to the sheet. ✅")
-                            except Exception:
-                                pass
-
-    # Always let commands run
-    await bot.process_commands(message)
-
-# ---------- Ready + health server ----------
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user}", flush=True)
-
-if ENABLE_WEB_SERVER:
+    log.info(f"Logged in as {bot.user} ({bot.user.id})")
     try:
-        from aiohttp import web
-        async def _health(request): return web.Response(text="ok")
-        async def web_main():
-            app = web.Application()
-            app.router.add_get("/", _health); app.router.add_get("/health", _health)
-            port = int(os.getenv("PORT","10000"))
-            runner = web.AppRunner(app); await runner.setup()
-            site = web.TCPSite(runner,"0.0.0.0",port); await site.start()
-            print(f"Health server on :{port}", flush=True)
-        async def start_all():
-            _print_boot_info()
-            if not TOKEN:
-                print("FATAL: DISCORD_TOKEN/TOKEN not set.", flush=True); raise SystemExit(2)
-            await asyncio.gather(web_main(), bot.start(TOKEN))
-        if __name__ == "__main__":
-            asyncio.run(start_all())
-    except Exception:
-        if __name__ == "__main__":
-            _print_boot_info()
-            if TOKEN: bot.run(TOKEN)
-            else: print("FATAL: DISCORD_TOKEN/TOKEN not set.", flush=True)
-else:
-    if __name__ == "__main__":
-        _print_boot_info()
-        if TOKEN: bot.run(TOKEN)
-        else: print("FATAL: DISCORD_TOKEN/TOKEN not set.", flush=True)
+        load_config()
+        log.info("Configuration loaded.")
+    except Exception as e:
+        log.error(f"Config error: {e}")
+        await bot.close()
+        return
+
+    mins = int(os.getenv("CONFIG_AUTO_REFRESH_MINUTES", "0") or "0")
+    global _AUTO_REFRESH_TASK
+    if mins > 0 and _AUTO_REFRESH_TASK is None:
+        _AUTO_REFRESH_TASK = asyncio.create_task(_auto_refresh_loop(mins))
+        log.info(f"Auto-refresh enabled: every {mins} minutes")
+
+if __name__ == "__main__":
+    token = os.getenv("DISCORD_BOT_TOKEN") or os.getenv("DISCORD_TOKEN")
+    if not token:
+        raise SystemExit("Set DISCORD_BOT_TOKEN")
+    keep_alive()
+    bot.run(token)
