@@ -414,10 +414,11 @@ GROUP: Dict[int, Dict[int, dict]] = {}
 
 async def _flush_group(guild: discord.Guild, user_id: int):
     entry = GROUP.get(guild.id, {}).pop(user_id, None)
-    if not entry: return
-    levels_ch = guild.get_channel(CFG["levels_channel_id"]) if CFG["levels_channel_id"] else None
+    if not entry:
+        return
+    levels_ch = guild.get_channel(CFG.get("levels_channel_id") or 0) if CFG.get("levels_channel_id") else None
     if not levels_ch:
-        log.warning("levels_channel_id not configured")
+        log.warning("[praise] levels_channel_id not configured or not found; skipping praise. cfg=%s", CFG.get("levels_channel_id"))
         return
     items = entry["items"]
     user = guild.get_member(user_id) or await guild.fetch_member(user_id)
@@ -433,15 +434,23 @@ def _buffer_item(guild: discord.Guild, user_id: int, role: discord.Role, ach: di
     if not e:
         e = g[user_id] = {"items": [], "task": None}
     e["items"].append((role, ach))
+
+    delay = max(0, int(CFG.get("group_window_seconds") or 0))  # set 0 in sheet for instant mode
     if e["task"]:
         e["task"].cancel()
+
     async def _delay():
         try:
-            await asyncio.sleep(CFG["group_window_seconds"])
+            if delay > 0:
+                await asyncio.sleep(delay)
             await _flush_group(guild, user_id)
         except asyncio.CancelledError:
             pass
+        except Exception:
+            log.exception("[praise] flush failed")
+
     e["task"] = asyncio.create_task(_delay())
+
 
 # ---------------- GK Review views ----------------
 class TryAgainView(discord.ui.View):
@@ -489,7 +498,8 @@ class GKReview(discord.ui.View):
 
     @discord.ui.button(label="Approve", style=discord.ButtonStyle.success)
     async def approve(self, itx: discord.Interaction, _btn: discord.ui.Button):
-        if not await self._only_gk(itx): return
+        if not await self._only_gk(itx):
+            return
         await itx.response.defer()
         await finalize_grant(itx.guild, self.claimant_id, self.ach_key)
         try:
@@ -499,7 +509,8 @@ class GKReview(discord.ui.View):
 
     @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger)
     async def deny(self, itx: discord.Interaction, _btn: discord.ui.Button):
-        if not await self._only_gk(itx): return
+        if not await self._only_gk(itx):
+            return
         reason = REASONS.get("NEED_BANNER", "Proof unclear. Please include the full result banner.")
         try:
             await itx.message.edit(
@@ -511,18 +522,50 @@ class GKReview(discord.ui.View):
 
     @discord.ui.button(label="Grant different role…", style=discord.ButtonStyle.secondary)
     async def grant_other(self, itx: discord.Interaction, _btn: discord.ui.Button):
-        if not await self._only_gk(itx): return
-        opts = [discord.SelectOption(label=a["display_name"], value=a["key"]) for a in ACHIEVEMENTS.values()]
+        if not await self._only_gk(itx):
+            return
+
+        # keep options in the same category as the originally requested achievement
+        base = ACHIEVEMENTS.get(self.ach_key) or {}
+        base_cat = base.get("category")
+
+        achs = [
+            a for a in ACHIEVEMENTS.values()
+            if a.get("category") == base_cat and a.get("key") != self.ach_key
+        ]
+
+        # sort for sanity, trim to Discord's 25-option limit
+        achs.sort(key=lambda a: (a.get("display_name") or a.get("key") or "").lower())
+        if not achs:
+            return await itx.response.send_message("No alternative roles in this category.", ephemeral=True)
+        if len(achs) > 25:
+            log.warning("[grant_other] trimmed options from %d to 25 in category=%s", len(achs), base_cat)
+            achs = achs[:25]
+
+        opts = []
+        for a in achs:
+            label = (a.get("display_name") or a.get("key") or "Unnamed")[:100]  # Discord cap
+            opts.append(discord.SelectOption(label=label, value=a["key"]))
+
         v = discord.ui.View(timeout=600)
         sel = discord.ui.Select(placeholder="Pick a role to grant instead…", options=opts)
-
+        
         async def _on_pick(sel_itx: discord.Interaction):
-            if not await self._only_gk(sel_itx): return
-            key = sel_itx.data["values"][0]
+            if not await self._only_gk(sel_itx):
+                return
+            key = (sel_itx.data.get("values") or [None])[0]
+            if not key or key not in ACHIEVEMENTS:
+                return await sel_itx.response.send_message(
+                    "That selection isn’t available anymore. Try again.",
+                    ephemeral=True
+                )
             await sel_itx.response.defer()
             await finalize_grant(sel_itx.guild, self.claimant_id, key)
             try:
+                # Update the public review message
                 await itx.message.edit(content="**Approved with different role.**", view=None)
+                # Also tidy up the ephemeral selector
+                await sel_itx.edit_original_response(content="✅ Granted.", view=None)
             except Exception:
                 pass
 
@@ -532,7 +575,8 @@ class GKReview(discord.ui.View):
 
     @discord.ui.button(label="Cancel request", style=discord.ButtonStyle.danger)
     async def cancel_req(self, itx: discord.Interaction, _btn: discord.ui.Button):
-        if not await self._only_claimant(itx): return
+        if not await self._only_claimant(itx):
+            return
         await itx.response.defer()
         try:
             await itx.message.delete()
@@ -545,6 +589,7 @@ class GKReview(discord.ui.View):
                 )
             except Exception:
                 pass
+
 
 # ---------------- Pickers with claim-state awareness ----------------
 class BaseView(discord.ui.View):
@@ -644,37 +689,73 @@ class CategoryPicker(BaseView):
         await show_role_picker(itx, cat_key, self.att, self.batch, claim_id=self.claim_id)
 
 class RolePicker(BaseView):
+    PAGE_SIZE = 25  # Discord hard limit per select
+
     def __init__(self, owner_id: int, cat_key: str, att: Optional[discord.Attachment],
-                 batch_list: Optional[List[discord.Attachment]], claim_id: int, announce: bool = False):
+                 batch_list: Optional[List[discord.Attachment]], claim_id: int, announce: bool = False, page: int = 0):
         super().__init__(owner_id, claim_id, announce=announce)
         self.cat_key = cat_key
         self.att = att
         self.batch = batch_list
-        achs = [a for a in ACHIEVEMENTS.values() if a.get("category")==cat_key]
-        opts = [discord.SelectOption(label=a["display_name"], value=a["key"]) for a in achs]
-        sel = discord.ui.Select(placeholder="Choose the exact achievement…", options=opts)
+        self.page = page
+
+        achs = [a for a in ACHIEVEMENTS.values() if a.get("category") == cat_key]
+        achs.sort(key=lambda r: (r.get("display_name") or r.get("key") or "").lower())
+
+        start = self.page * self.PAGE_SIZE
+        chunk = achs[start:start + self.PAGE_SIZE]
+        if not chunk:
+            chunk = achs[:self.PAGE_SIZE]
+            self.page = 0
+
+        opts = []
+        for a in chunk:
+            label = a.get("display_name") or a.get("key") or "Unnamed"
+            label = (label or "Unnamed")[:100]
+            opts.append(discord.SelectOption(label=label, value=a["key"]))
+
+        sel = discord.ui.Select(placeholder="Choose the exact achievement…", options=opts, min_values=1, max_values=1)
         sel.callback = self._on_pick
         self.add_item(sel)
+
+        # nav + basics
+        prev_btn = discord.ui.Button(label="◀ Prev", style=discord.ButtonStyle.secondary, disabled=(self.page == 0))
+        next_btn = discord.ui.Button(label="Next ▶", style=discord.ButtonStyle.secondary,
+                                     disabled=(start + self.PAGE_SIZE >= len(achs)))
         back = discord.ui.Button(label="Back", style=discord.ButtonStyle.secondary)
-        back.callback = self._back
-        self.add_item(back)
         cancel = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.danger)
-        cancel.callback = self._cancel
+
+        async def _prev(itx: discord.Interaction):
+            await show_role_picker(itx, self.cat_key, self.att, self.batch, claim_id=self.claim_id, page=self.page - 1)
+
+        async def _next(itx: discord.Interaction):
+            await show_role_picker(itx, self.cat_key, self.att, self.batch, claim_id=self.claim_id, page=self.page + 1)
+
+        async def _back(itx: discord.Interaction):
+            await show_category_picker(itx, self.att, self.batch, claim_id=self.claim_id)
+
+        async def _cancel(itx: discord.Interaction):
+            try: await itx.message.delete()
+            except Exception: pass
+            CLAIM_STATE[self.claim_id] = "canceled"
+            self.stop()
+            await itx.channel.send(f"**Claim canceled by {itx.user.mention}.** No action needed.")
+
+        prev_btn.callback = _prev
+        next_btn.callback = _next
+        back.callback = _back
+        cancel.callback = _cancel
+
+        self.add_item(prev_btn)
+        self.add_item(next_btn)
+        self.add_item(back)
         self.add_item(cancel)
-
-    async def _back(self, itx: discord.Interaction):
-        await show_category_picker(itx, self.att, self.batch, claim_id=self.claim_id)
-
-    async def _cancel(self, itx: discord.Interaction):
-        try: await itx.message.delete()
-        except Exception: pass
-        CLAIM_STATE[self.claim_id] = "canceled"
-        self.stop()
-        await itx.channel.send(f"**Claim canceled by {itx.user.mention}.** No action needed.")
 
     async def _on_pick(self, itx: discord.Interaction):
         await itx.response.defer()
-        key = itx.data["values"][0]
+        key = (itx.data.get("values") or [None])[0]
+        if not key:
+            return await itx.followup.send("No selection received. Please try again.", ephemeral=True)
         await process_claim(itx, key, self.att, self.batch, claim_id=self.claim_id)
 
 # ---------------- Flow helpers ----------------
@@ -689,8 +770,8 @@ async def show_category_picker(itx: discord.Interaction, attachment: Optional[di
         v.message = m
 
 async def show_role_picker(itx: discord.Interaction, cat_key: str, attachment: Optional[discord.Attachment],
-                           batch_list: Optional[List[discord.Attachment]] = None, claim_id: int = 0):
-    v = RolePicker(itx.user.id, cat_key, attachment, batch_list, claim_id=claim_id)
+                           batch_list: Optional[List[discord.Attachment]] = None, claim_id: int = 0, page: int = 0):
+    v = RolePicker(itx.user.id, cat_key, attachment, batch_list, claim_id=claim_id, page=page)
     try:
         await itx.response.edit_message(content=f"**{cat_key}** — choose the exact achievement:", view=v)
         v.message = await itx.edit_original_response()
@@ -701,12 +782,36 @@ async def show_role_picker(itx: discord.Interaction, cat_key: str, attachment: O
 # ---------------- Claim processing ----------------
 async def finalize_grant(guild: discord.Guild, user_id: int, ach_key: str):
     ach = ACHIEVEMENTS.get(ach_key)
-    if not ach: return
+    if not ach:
+        log.warning("[grant] unknown ach_key=%s", ach_key)
+        return
+
     role = _get_role_by_config(guild, ach)
-    if not role: return
+    if not role:
+        log.warning("[grant] role not found for ach_key=%s (role_id=%s, display_name=%s)",
+                    ach_key, ach.get("role_id"), ach.get("display_name"))
+        return
+
     member = guild.get_member(user_id) or await guild.fetch_member(user_id)
-    if role in member.roles: return
+
+    me = guild.me
+    if not me.guild_permissions.manage_roles or role >= me.top_role:
+        log.error("[grant] cannot assign role '%s' (%d). Check Manage Roles + role hierarchy (bot top role above).",
+                  role.name, role.id)
+        ch = guild.get_channel(CFG.get("audit_log_channel_id") or 0)
+        if ch:
+            await ch.send(
+                f"⚠️ I can’t assign **{role.mention}** to {member.mention}. "
+                f"Please move my top role above **{role.name}** and ensure I have **Manage Roles**."
+            )
+        return
+
+    if role in member.roles:
+        log.info("[grant] %s already has %s", member, role)
+        return
+
     await member.add_roles(role, reason=f"claim:{ach_key}")
+    log.info("[grant] assigned role '%s' to %s (ach=%s)", role.name, member, ach_key)
 
     if CFG.get("audit_log_channel_id"):
         ch = guild.get_channel(CFG["audit_log_channel_id"])
@@ -721,6 +826,7 @@ async def finalize_grant(guild: discord.Guild, user_id: int, ach_key: str):
 
     _buffer_item(guild, user_id, role, ach)
 
+
 async def process_claim(itx: discord.Interaction, ach_key: str,
                         att: Optional[discord.Attachment],
                         batch_list: Optional[List[discord.Attachment]],
@@ -732,11 +838,16 @@ async def process_claim(itx: discord.Interaction, ach_key: str,
     guild = itx.guild
     ach = ACHIEVEMENTS.get(ach_key)
     if not ach:
-        await itx.followup.send("Unknown achievement.", ephemeral=True)
+        log.warning("[claim] selection key missing from ACHIEVEMENTS: %s", ach_key)
+        await itx.followup.send("That selection isn’t in my config. Try again or ping a Guardian Knight.", ephemeral=True)
         return
+
+    # 🔧 THIS WAS MISSING — without it, `role` below crashes
     role = _get_role_by_config(guild, ach)
     if not role:
-        await itx.followup.send("Role not configured. Ping an admin.", ephemeral=True)
+        log.warning("[claim] role not configured for ach_key=%s (role_id=%s, display_name=%s)",
+                    ach_key, ach.get("role_id"), ach.get("display_name"))
+        await itx.followup.send("Role not configured for this achievement. Ping an admin.", ephemeral=True)
         return
 
     mode = (ach.get("mode") or "AUTO_GRANT").upper()
@@ -764,7 +875,8 @@ async def process_claim(itx: discord.Interaction, ach_key: str,
             timestamp=datetime.datetime.utcnow(),
         )
         thumb = resolve_hero_image(guild, role, ach)
-        if thumb: emb.set_thumbnail(url=thumb)
+        if thumb:
+            emb.set_thumbnail(url=thumb)
         v = GKReview(itx.user.id, ach_key, a, claim_id=claim_id)
         await itx.channel.send(content=f"{ping}, please review.", embed=emb, view=v)
 
