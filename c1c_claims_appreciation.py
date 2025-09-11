@@ -896,7 +896,7 @@ async def testlevel(ctx: commands.Context, *, args: str = ""):
 
 @bot.command(name="ping")
 async def ping(ctx: commands.Context):
-    await ctx.send("✅ Live and listening.")
+    await ctx.send("🏓 Pong — Live and listening.")
 
 # ---------------- help (overview + subtopics, silent on unknown) ----------------
 HELP_COLOR = discord.Color.blurple()
