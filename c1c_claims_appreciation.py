@@ -893,15 +893,13 @@ async def ping(ctx: commands.Context):
 
 # ---------------- error reporter ----------------
 @bot.event
-async def on_command_error(ctx: commands.Context, error: Exception):
+async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
-        return
+        return  # ignore silently
     try:
-        await ctx.send(f"⚠️ **{type(error).__name__}**: `{error}`")
-    except Exception:
+        await ctx.reply(f"⚠️ Command error: `{type(error).__name__}: {error}`")
+    except:
         pass
-    tb = "".join(traceback.format_exception(type(error), error, error.__traceback__))
-    log.error("Command error:\n%s", tb)
 
 # ---------------- message listener ----------------
 @bot.event
