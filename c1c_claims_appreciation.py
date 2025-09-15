@@ -524,14 +524,13 @@ class GKReview(discord.ui.View):
     async def approve(self, itx: discord.Interaction, _btn: discord.ui.Button):
         if not await self._only_gk(itx):
             return
-
-        # INSERT ↓ (before defer)
+            
         ach = ACHIEVEMENTS.get(self.ach_key) or {}
         role = _get_role_by_config(itx.guild, ach)
         member = itx.guild.get_member(self.claimant_id) or await itx.guild.fetch_member(self.claimant_id)
         if role and member and role in member.roles:
             try:
-                await itx.message.edit(content="**Already has this role.** No action needed.", view=None)
+                 await itx.response.edit_message(content="**Already has this role.** No action needed.", view=None)
             except Exception:
                 pass
             return
@@ -555,12 +554,12 @@ class GKReview(discord.ui.View):
             return
         reason = REASONS.get("NEED_BANNER", "Proof unclear. Please include the full result banner.")
         try:
-            await itx.message.edit(
+            await itx.response.edit_message(
                 content=f"**Not approved.** Reason: **{reason}**\nPost a clearer screenshot and hit **Try Again**.",
                 view=TryAgainView(self.claimant_id, self.att, claim_id=self.claim_id)
             )
             if self.claim_id:
-                CLAIM_STATE[self.claim_id] = "closed"  # <- add this line
+                CLAIM_STATE[self.claim_id] = "closed"  
         except Exception:
             pass
 
@@ -851,8 +850,18 @@ async def finalize_grant(guild: discord.Guild, user_id: int, ach_key: str) -> bo
         log.info("[grant] %s already has %s", member, role)
         return False
 
-    await member.add_roles(role, reason=f"claim:{ach_key}")
-    log.info("[grant] assigned role '%s' to %s (ach=%s)", role.name, member, ach_key)
+    # Attempt to assign the role, and report any Discord errors
+    try:
+        await member.add_roles(role, reason=f"claim:{ach_key}")
+    except Exception as e:
+        log.error("[grant] add_roles failed for '%s' -> %s: %r", role.name, member, e)
+        ch = guild.get_channel(CFG.get("audit_log_channel_id") or 0)
+        if ch:
+            await ch.send(
+                f"⚠️ Tried to assign {role.mention} to {member.mention} but got "
+                f"`{type(e).__name__}: {e}`. Check permissions/role hierarchy and try again."
+            )
+        return False
 
     if CFG.get("audit_log_channel_id"):
         ch = guild.get_channel(CFG["audit_log_channel_id"])
