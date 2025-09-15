@@ -284,9 +284,13 @@ def resolve_hero_image(guild: discord.Guild, role: discord.Role, ach_row: dict) 
     cat = _category_by_key(ach_row.get("category") or "")
     return _httpish(ach_row.get("HeroImageURL")) or _httpish((cat or {}).get("hero_image_url")) or _big_role_icon_url(role)
 
-async def safe_send_embed(dest, embed: discord.Embed):
+async def safe_send_embed(dest, embed: discord.Embed, *, ping_user: Optional[discord.abc.User] = None):
     try:
-        return await dest.send(embed=embed)
+        content = ping_user.mention if ping_user else None
+        am = discord.AllowedMentions(
+            users=True, roles=False, everyone=False, replied_user=False
+        ) if ping_user else None
+        return await dest.send(content=content, embed=embed, allowed_mentions=am)
     except discord.Forbidden:
         return await dest.send(
             "I tried to send an embed here but I'm missing **Embed Links**.\n"
@@ -294,6 +298,7 @@ async def safe_send_embed(dest, embed: discord.Embed):
         )
     except Exception as e:
         return await dest.send(f"Couldn’t send embed: `{e}`")
+
 
 def _resolve_target_channel(ctx: commands.Context, where: Optional[str]):
     if not where:
@@ -447,9 +452,9 @@ async def _flush_group(guild: discord.Guild, user_id: int):
     user = guild.get_member(user_id) or await guild.fetch_member(user_id)
     if len(items) == 1:
         r, ach = items[0]
-        await safe_send_embed(levels_ch, build_achievement_embed(guild, user, r, ach))
+        await safe_send_embed(levels_ch, build_achievement_embed(guild, user, r, ach), ping_user=user)
     else:
-        await safe_send_embed(levels_ch, build_group_embed(guild, user, items))
+        await safe_send_embed(levels_ch, build_group_embed(guild, user, items), ping_user=user)
 
 def _buffer_item(guild: discord.Guild, user_id: int, role: discord.Role, ach: dict):
     g = GROUP.setdefault(guild.id, {})
@@ -850,7 +855,6 @@ async def finalize_grant(guild: discord.Guild, user_id: int, ach_key: str) -> bo
         log.info("[grant] %s already has %s", member, role)
         return False
 
-    # Attempt to assign the role, and report any Discord errors
     try:
         await member.add_roles(role, reason=f"claim:{ach_key}")
     except Exception as e:
@@ -862,6 +866,7 @@ async def finalize_grant(guild: discord.Guild, user_id: int, ach_key: str) -> bo
                 f"`{type(e).__name__}: {e}`. Check permissions/role hierarchy and try again."
             )
         return False
+
 
     if CFG.get("audit_log_channel_id"):
         ch = guild.get_channel(CFG["audit_log_channel_id"])
@@ -1179,7 +1184,8 @@ async def on_member_update(before: discord.Member, after: discord.Member):
                 row = _match_levels_row_by_role(role)
                 if row:
                     emb = build_level_embed(after.guild, after, row)
-                    await safe_send_embed(levels_ch, emb)
+                    await safe_send_embed(levels_ch, emb, ping_user=after)
+
     except Exception:
         log.exception("[levels] on_member_update failed")
 
@@ -1197,7 +1203,8 @@ async def on_message(msg: discord.Message):
                 user = msg.mentions[0] if msg.mentions else msg.author
                 ch = msg.guild.get_channel(CFG["levels_channel_id"]) if CFG["levels_channel_id"] else None
                 if ch:
-                    await ch.send(embed=build_level_embed(msg.guild, user, row))
+                    emb = build_level_embed(msg.guild, user, row)
+                    await safe_send_embed(ch, emb, ping_user=user)
                 break
     except Exception:
         pass
