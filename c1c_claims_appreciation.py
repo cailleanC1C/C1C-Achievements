@@ -2,25 +2,95 @@
 # C1C Appreciation + Claims Bot — v1.0
 # Web Service (Flask keep-alive) + config loader + review flow
 
-import os, re, json, asyncio, logging, datetime, threading
+import os, re, json, asyncio, logging, threading
+import datetime as dt
 from typing import Optional, List, Dict, Tuple
 from functools import partial
 from urllib.parse import urlparse
 
 import discord
 from discord.ext import commands
-from flask import Flask
+from flask import Flask, jsonify
+
+STRICT_PROBE=0                # keep Render happy: / and /ready always 200
+WATCHDOG_CHECK_SEC=60
+WATCHDOG_MAX_DISCONNECT_SEC=600
+
+import time, sys
+from datetime import timezone as _tz
+from collections import deque
+from discord.ext import tasks
+
 
 # ---------------- keep-alive (Render web service) ----------------
 app = Flask(__name__)
 
-@app.route("/")
-def health():
+@app.get("/")
+def _root_ok():
+    # Always 200 to keep Render green
     return "ok", 200
+
+@app.get("/ready")
+def _ready_ok():
+    # Same as root; include some status text
+    try:
+        latency_ms = int(getattr(bot, "latency", 0) * 1000)
+    except Exception:
+        latency_ms = None
+    return jsonify({
+        "bot_ready": getattr(bot, "is_ready", lambda: False)(),
+        "latency_ms": latency_ms,
+        "uptime": uptime_str(),
+    }), 200
+
+@app.get("/healthz")
+def _deep_health():
+    # Deep probe. If STRICT_PROBE=0 (default) we still return 200
+    connected = BOT_CONNECTED
+    age = _last_event_age_s()
+    try:
+        latency = float(bot.latency) if bot.latency is not None else None
+    except Exception:
+        latency = None
+
+    status = 200 if connected else 503
+    if connected and age is not None and age > 600 and (latency is None or latency > 10):
+        status = 206  # “zombie-ish”
+
+    body = {
+        "ok": connected,
+        "connected": connected,
+        "uptime": uptime_str(),
+        "last_event_age_s": age,
+        "latency_s": latency,
+        "strict_probe": STRICT_PROBE,
+    }
+    return jsonify(body), (status if STRICT_PROBE else 200)
 
 def keep_alive():
     port = int(os.getenv("PORT", "10000"))
     threading.Thread(target=lambda: app.run(host="0.0.0.0", port=port), daemon=True).start()
+
+BOT_CONNECTED: bool = False
+_LAST_READY_TS: float = 0.0
+_LAST_DISCONNECT_TS: float = 0.0
+_LAST_EVENT_TS: float = 0.0
+
+def _now() -> float: return time.time()
+def _mark_event() -> None:
+    global _LAST_EVENT_TS
+    _LAST_EVENT_TS = _now()
+def _last_event_age_s() -> int | None:
+    return int(_now() - _LAST_EVENT_TS) if _LAST_EVENT_TS else None
+
+STRICT_PROBE = (os.getenv("STRICT_PROBE", "0") == "1")
+WATCHDOG_CHECK_SEC = int(os.getenv("WATCHDOG_CHECK_SEC", "60"))
+WATCHDOG_MAX_DISCONNECT_SEC = int(os.getenv("WATCHDOG_MAX_DISCONNECT_SEC", "600"))
+
+START_TS = time.time()
+def uptime_str():
+    s = int(time.time() - START_TS); h, s = divmod(s,3600); m, s = divmod(s,60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 # ---------------- optional libs for config sources ----------------
 try:
@@ -224,7 +294,7 @@ def load_config():
         raise RuntimeError("No config loaded. Set CONFIG_SHEET_ID (+SERVICE_ACCOUNT_JSON) or LOCAL_CONFIG_XLSX.")
 
     CONFIG_META["source"] = source
-    CONFIG_META["loaded_at"] = datetime.datetime.utcnow()
+    CONFIG_META["loaded_at"] = dt.datetime.utcnow()
 
 # ---------------- helpers ----------------
 def _is_image(att: discord.Attachment) -> bool:
@@ -369,7 +439,7 @@ def build_achievement_embed(guild: discord.Guild, user: discord.Member, role: di
     footer = _inject_tokens(_clean(ach_row.get("Footer")) or "", user=user, role=role, emoji=emoji)
     color = _color_from_hex(ach_row.get("ColorHex")) or (role.color if getattr(role.color, "value", 0) else discord.Color.blurple())
 
-    emb = discord.Embed(title=title, description=body, color=color, timestamp=datetime.datetime.utcnow())
+    emb = discord.Embed(title=title, description=body, color=color, timestamp=dt.datetime.utcnow())
 
     if CFG.get("embed_author_name"):
         icon = _safe_icon(CFG.get("embed_author_icon"))
@@ -390,7 +460,7 @@ def build_achievement_embed(guild: discord.Guild, user: discord.Member, role: di
 def build_group_embed(guild: discord.Guild, user: discord.Member, items: List[Tuple[discord.Role, dict]]) -> discord.Embed:
     r0, a0 = items[0]
     color = _color_from_hex(a0.get("ColorHex")) or (r0.color if getattr(r0.color, "value", 0) else discord.Color.blurple())
-    emb = discord.Embed(title=f"{user.display_name} unlocked {len(items)} achievements", color=color, timestamp=datetime.datetime.utcnow())
+    emb = discord.Embed(title=f"{user.display_name} unlocked {len(items)} achievements", color=color, timestamp=dt.datetime.utcnow())
 
     if CFG.get("embed_author_name"):
         icon = _safe_icon(CFG.get("embed_author_icon"))
@@ -423,7 +493,7 @@ def build_level_embed(guild: discord.Guild, user: discord.Member, row: dict) -> 
     footer = _inject_tokens(_clean(row.get("Footer")) or "", user=user, role=role_for_tokens, emoji=emoji)
     color = _color_from_hex(row.get("ColorHex")) or discord.Color.gold()
 
-    emb = discord.Embed(title=title, description=body, color=color, timestamp=datetime.datetime.utcnow())
+    emb = discord.Embed(title=title, description=body, color=color, timestamp=dt.datetime.utcnow())
 
     if CFG.get("embed_author_name"):
         icon = _safe_icon(CFG.get("embed_author_icon"))
@@ -875,7 +945,7 @@ async def finalize_grant(guild: discord.Guild, user_id: int, ach_key: str) -> bo
                 title="Achievement Claimed",
                 description=f"**User:** {member.mention}\n**Role:** {role.mention}\n**Key:** `{ach_key}`",
                 color=discord.Color.green(),
-                timestamp=datetime.datetime.utcnow()
+                timestamp=dt.datetime.utcnow()
             )
             await ch.send(embed=emb)
 
@@ -943,7 +1013,7 @@ async def process_claim(itx: discord.Interaction, ach_key: str,
             title="Verification needed",
             description=f"{itx.user.mention} requested **{role.name}**",
             color=discord.Color.orange(),
-            timestamp=datetime.datetime.utcnow(),
+            timestamp=dt.datetime.utcnow(),
         )
         thumb = resolve_hero_image(guild, role, ach)
         if thumb:
@@ -1166,6 +1236,64 @@ async def on_command_error(ctx, error):
     except:
         pass
 
+@bot.event
+async def on_socket_response(_payload):
+    _mark_event()
+
+@bot.event
+async def on_connect():
+    global BOT_CONNECTED
+    BOT_CONNECTED = True
+    _mark_event()
+
+@bot.event
+async def on_resumed():
+    global BOT_CONNECTED
+    BOT_CONNECTED = True
+    _mark_event()
+
+
+@bot.event
+async def on_disconnect():
+    global BOT_CONNECTED, _LAST_DISCONNECT_TS
+    BOT_CONNECTED = False
+    _LAST_DISCONNECT_TS = _now()
+    
+# ---------------- message listener ----------------
+async def _maybe_restart(reason: str):
+    try:
+        print(f"[WATCHDOG] Restarting: {reason}", flush=True)
+    finally:
+        try:
+            await bot.close()
+        finally:
+            sys.exit(1)
+
+@tasks.loop(seconds=WATCHDOG_CHECK_SEC)
+async def _watchdog():
+    now = _now()
+
+    if BOT_CONNECTED:
+        idle_for = (now - _LAST_EVENT_TS) if _LAST_EVENT_TS else 0
+        try:
+            latency = float(getattr(bot, "latency", 0.0)) if bot.latency is not None else None
+        except Exception:
+            latency = None
+
+        # Connected but no gateway events for >10m and latency bad/missing → zombie
+        if _LAST_EVENT_TS and idle_for > 600 and (latency is None or latency > 10):
+            await _maybe_restart(f"zombie: no events {int(idle_for)}s, latency={latency}")
+        return
+
+    # Disconnected: if it lasts too long, restart
+    global _LAST_DISCONNECT_TS
+    if not _LAST_DISCONNECT_TS:
+        _LAST_DISCONNECT_TS = now
+        return
+    if (now - _LAST_DISCONNECT_TS) > WATCHDOG_MAX_DISCONNECT_SEC:
+        await _maybe_restart(f"disconnected too long: {int(now - _LAST_DISCONNECT_TS)}s")
+
+
 # ---------------- message listener ----------------
 @bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
@@ -1245,6 +1373,18 @@ async def _auto_refresh_loop(minutes: int):
 
 @bot.event
 async def on_ready():
+    # --- gateway status + watchdog bootstrap ---
+    global BOT_CONNECTED, _LAST_READY_TS
+    BOT_CONNECTED = True
+    _LAST_READY_TS = _now()
+    _mark_event()
+    try:
+        if not _watchdog.is_running():
+            _watchdog.start()
+    except NameError:
+        pass
+
+    # --- existing app boot work (logging + config load + auto refresh) ---
     log.info(f"Logged in as {bot.user} ({bot.user.id})")
     try:
         load_config()
@@ -1259,6 +1399,7 @@ async def on_ready():
     if mins > 0 and _AUTO_REFRESH_TASK is None:
         _AUTO_REFRESH_TASK = asyncio.create_task(_auto_refresh_loop(mins))
         log.info(f"Auto-refresh enabled: every {mins} minutes")
+
 
 if __name__ == "__main__":
     token = os.getenv("DISCORD_BOT_TOKEN") or os.getenv("DISCORD_TOKEN")
