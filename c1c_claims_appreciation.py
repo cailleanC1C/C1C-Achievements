@@ -21,7 +21,6 @@ from datetime import timezone as _tz
 from collections import deque
 from discord.ext import tasks
 
-
 # ---------------- keep-alive (Render web service) ----------------
 app = Flask(__name__)
 
