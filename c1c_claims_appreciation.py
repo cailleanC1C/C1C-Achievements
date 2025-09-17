@@ -17,7 +17,6 @@ WATCHDOG_CHECK_SEC=60
 WATCHDOG_MAX_DISCONNECT_SEC=600
 
 import time, sys
-from datetime import timezone as _tz
 from collections import deque
 from discord.ext import tasks
 
