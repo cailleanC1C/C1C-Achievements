@@ -1049,52 +1049,6 @@ def _is_staff(member: discord.Member) -> bool:
     return bool(rid and any(r.id == rid for r in member.roles))
 
 # ---------------- admin/test commands ----------------
-@bot.command(name="testconfig")
-async def testconfig(cmdx: commands.Context):
-    if not _is_staff(cmdx.author):
-        return await cmdx.send("Staff only.")
-
-    thread_txt = await _fmt_chan_or_thread(cmdx.guild, CFG.get("public_claim_thread_id"))
-    levels_txt = await _fmt_chan_or_thread(cmdx.guild, CFG.get("levels_channel_id"))
-    audit_txt  = await _fmt_chan_or_thread(cmdx.guild, CFG.get("audit_log_channel_id"))
-    gk_txt     = _fmt_role(cmdx.guild, CFG.get("guardian_knights_role_id"))
-    loaded_at = CONFIG_META["loaded_at"].strftime("%Y-%m-%d %H:%M:%S UTC") if CONFIG_META["loaded_at"] else "—"
-
-    emb = discord.Embed(title="Current configuration", color=discord.Color.blurple())
-    if CFG.get("embed_author_name"):
-        icon = _safe_icon(CFG.get("embed_author_icon"))
-        if icon: emb.set_author(name=CFG["embed_author_name"], icon_url=icon)
-        else:    emb.set_author(name=CFG["embed_author_name"])
-    emb.add_field(name="Claims thread", value=thread_txt, inline=False)
-    emb.add_field(name="Levels channel", value=levels_txt, inline=False)
-    emb.add_field(name="Audit-log channel", value=audit_txt, inline=False)
-    emb.add_field(name="Guardian Knights role", value=gk_txt, inline=False)
-    emb.add_field(name="Source", value=f"{CONFIG_META['source']} — {loaded_at}", inline=False)
-    emb.add_field(
-        name="Loaded rows",
-        value=f"Achievements: **{len(ACHIEVEMENTS)}**\nCategories: **{len(CATEGORIES)}**\nLevels: **{len(LEVELS)}**",
-        inline=False,
-    )
-    await safe_send_embed(cmdx, emb)
-
-@bot.command(name="configstatus")
-async def configstatus(ctx: commands.Context):
-    if not _is_staff(ctx.author):
-        return await ctx.send("Staff only.")
-    loaded_at = CONFIG_META["loaded_at"].strftime("%Y-%m-%d %H:%M:%S UTC") if CONFIG_META["loaded_at"] else "—"
-    await ctx.send(f"Source: **{CONFIG_META['source']}** | Loaded: **{loaded_at}** | Ach={len(ACHIEVEMENTS)} Cat={len(CATEGORIES)} Lvls={len(LEVELS)}")
-
-@bot.command(name="reloadconfig")
-async def reloadconfig(ctx: commands.Context):
-    if not _is_staff(ctx.author):
-        return await ctx.send("Staff only.")
-    try:
-        load_config()
-        loaded_at = CONFIG_META["loaded_at"].strftime("%Y-%m-%d %H:%M:%S UTC")
-        await ctx.send(f"🔁 Reloaded from **{CONFIG_META['source']}** at **{loaded_at}**. Ach={len(ACHIEVEMENTS)} Cat={len(CATEGORIES)} Lvls={len(LEVELS)}")
-    except Exception as e:
-        await ctx.send(f"Reload failed: `{e}`")
-
 @bot.command(name="listach")
 async def listach(ctx: commands.Context, filter_text: str = ""):
     if not _is_staff(ctx.author):
