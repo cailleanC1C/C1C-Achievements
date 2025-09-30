@@ -19,6 +19,7 @@ WATCHDOG_MAX_DISCONNECT_SEC=600
 import time, sys
 from collections import deque
 from discord.ext import tasks
+from cogs.ops import OpsCog
 from claims.help import build_help_overview_embed, build_help_subtopic_embed
 
 # ---------------- keep-alive (Render web service) ----------------
@@ -120,6 +121,7 @@ try:
     bot.remove_command("help")
 except Exception:
     pass
+bot.add_cog(OpsCog(bot))
 
 # ---------------- runtime config ----------------
 CFG = {
