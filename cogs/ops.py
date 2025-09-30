@@ -21,6 +21,7 @@ from claims.ops import (
 # Access the running main module (the monolith) for data/functions.
 app = importlib.import_module("__main__")
 
+
 class OpsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -93,6 +94,7 @@ class OpsCog(commands.Cog):
         levels_txt = await app._fmt_chan_or_thread(ctx.guild, app.CFG.get("levels_channel_id"))
         audit_txt  = await app._fmt_chan_or_thread(ctx.guild, app.CFG.get("audit_log_channel_id"))
         gk_txt     = app._fmt_role(ctx.guild, app.CFG.get("guardian_knights_role_id"))
+
         def _ok(s: str) -> str:
             s = str(s or "")
             return "ok" if (s and "unknown" not in s and s != "—") else "—"
@@ -181,46 +183,63 @@ class OpsCog(commands.Cog):
         emb = build_checksheet_embed(app.BOT_VERSION, backend, items)
         await app.safe_send_embed(ctx, emb)
 
-@commands.command(name="reboot", aliases=["restart", "rb"])
-async def reboot_cmd(self, ctx: commands.Context):
-    if not app._is_staff(ctx.author):
-        return await ctx.send("Staff only.")
+    @commands.command(name="env")
+    async def env_cmd(self, ctx: commands.Context):
+        if not app._is_staff(ctx.author):
+            return await ctx.send("Staff only.")
+        local = os.getenv("LOCAL_CONFIG_XLSX", "").strip()
+        env_info = {
+            "CONFIG_SHEET_ID": "set" if os.getenv("CONFIG_SHEET_ID") else "not set",
+            "SERVICE_ACCOUNT_JSON": "set" if os.getenv("SERVICE_ACCOUNT_JSON") else "not set",
+            "LOCAL_CONFIG_XLSX": (os.path.basename(local) if local else "not set"),
+            "CONFIG_AUTO_REFRESH_MINUTES": os.getenv("CONFIG_AUTO_REFRESH_MINUTES", "0"),
+            "STRICT_PROBE": "1" if app.STRICT_PROBE else "0",
+            "WATCHDOG_CHECK_SEC": str(app.WATCHDOG_CHECK_SEC),
+            "WATCHDOG_MAX_DISCONNECT_SEC": str(app.WATCHDOG_MAX_DISCONNECT_SEC),
+        }
+        emb = build_env_embed(app.BOT_VERSION, env_info)
+        await app.safe_send_embed(ctx, emb)
 
-    # react immediately so callers see liveness
-    try:
-        await ctx.message.add_reaction("🔁")
-    except Exception:
-        pass
+    @commands.command(name="reboot", aliases=["restart", "rb"])
+    async def reboot_cmd(self, ctx: commands.Context):
+        if not app._is_staff(ctx.author):
+            return await ctx.send("Staff only.")
 
-    # show "Rebooting…" then perform a soft restart (reload config)
-    ack = None
-    try:
-        emb = build_rebooting_embed(app.BOT_VERSION)
-        ack = await app.safe_send_embed(ctx, emb)
-    except Exception:
-        # last-resort: plain text
+        # react immediately so callers see liveness
         try:
-            ack = await ctx.send("Rebooting…")
+            await ctx.message.add_reaction("🔁")
         except Exception:
             pass
 
-    try:
-        app.load_config()
-        loaded_at = app.CONFIG_META["loaded_at"].strftime("%Y-%m-%d %H:%M:%S UTC") if app.CONFIG_META.get("loaded_at") else "—"
-        counts = {
-            "ach": len(app.ACHIEVEMENTS),
-            "cat": len(app.CATEGORIES),
-            "lvls": len(app.LEVELS),
-            "reasons": len(app.REASONS),
-        }
-        done = build_reload_embed(app.BOT_VERSION, app.CONFIG_META.get("source","—"), loaded_at, counts)
-
-        if ack:
+        # show "Rebooting…" then perform a soft restart (reload config)
+        ack = None
+        try:
+            emb = build_rebooting_embed(app.BOT_VERSION)
+            ack = await app.safe_send_embed(ctx, emb)
+        except Exception:
+            # last-resort: plain text
             try:
-                await ack.edit(content="🔄 Reloaded config. Ready.", embed=done)
+                ack = await ctx.send("Rebooting…")
             except Exception:
+                pass
+
+        try:
+            app.load_config()
+            loaded_at = app.CONFIG_META["loaded_at"].strftime("%Y-%m-%d %H:%M:%S UTC") if app.CONFIG_META.get("loaded_at") else "—"
+            counts = {
+                "ach": len(app.ACHIEVEMENTS),
+                "cat": len(app.CATEGORIES),
+                "lvls": len(app.LEVELS),
+                "reasons": len(app.REASONS),
+            }
+            done = build_reload_embed(app.BOT_VERSION, app.CONFIG_META.get("source","—"), loaded_at, counts)
+
+            if ack:
+                try:
+                    await ack.edit(content="🔄 Reloaded config. Ready.", embed=done)
+                except Exception:
+                    await app.safe_send_embed(ctx, done)
+            else:
                 await app.safe_send_embed(ctx, done)
-        else:
-            await app.safe_send_embed(ctx, done)
-    except Exception as e:
-        await ctx.send(f"Reboot failed: `{e}`")
+        except Exception as e:
+            await ctx.send(f"Reboot failed: `{e}`")
