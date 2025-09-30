@@ -1350,6 +1350,33 @@ async def on_ready():
     if mins > 0 and _AUTO_REFRESH_TASK is None:
         _AUTO_REFRESH_TASK = asyncio.create_task(_auto_refresh_loop(mins))
         log.info(f"Auto-refresh enabled: every {mins} minutes")
+    # --- post-reboot: edit the ack message if we left a handoff file ---
+    try:
+        import json, os
+        from claims.ops import build_reload_embed  # reuse footer/style
+        handoff = "/tmp/c1c_claims_reboot.json"
+        if os.path.exists(handoff):
+            with open(handoff, "r") as f:
+                info = json.load(f)
+            ch_id = int(info.get("channel_id") or 0)
+            msg_id = int(info.get("message_id") or 0)
+            ch = bot.get_channel(ch_id) or await bot.fetch_channel(ch_id)
+            if ch and msg_id:
+                # Compose a short "ready" embed using the reload style
+                loaded_at = CONFIG_META["loaded_at"].strftime("%Y-%m-%d %H:%M:%S UTC") if CONFIG_META.get("loaded_at") else "—"
+                counts = {"ach": len(ACHIEVEMENTS), "cat": len(CATEGORIES), "lvls": len(LEVELS), "reasons": len(REASONS)}
+                emb = build_reload_embed(BOT_VERSION, CONFIG_META.get("source", "—"), loaded_at, counts)
+                try:
+                    msg = await ch.fetch_message(msg_id)
+                    await msg.edit(content="🔄 Reloaded config. Ready.", embed=emb)
+                except Exception:
+                    pass
+            try:
+                os.remove(handoff)
+            except Exception:
+                pass
+    except Exception:
+        log.exception("post-reboot edit failed")
 
 
 if __name__ == "__main__":
