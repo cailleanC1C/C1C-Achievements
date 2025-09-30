@@ -1150,7 +1150,11 @@ async def testlevel(ctx: commands.Context, *, args: str = ""):
 
 @bot.command(name="ping")
 async def ping(ctx: commands.Context):
-    await ctx.send("🏓 Pong — Live and listening.")
+    # react-only liveness check
+    try:
+        await ctx.message.add_reaction("🏓")
+    except Exception:
+        pass
 
 # ---------------- help (overview + subtopics, silent on unknown) ----------------
 @bot.command(name="help")
