@@ -17,7 +17,6 @@ from claims.ops import (
 # Access the running main module (the monolith) for data/functions.
 app = importlib.import_module("__main__")
 
-
 class OpsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
