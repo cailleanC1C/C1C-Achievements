@@ -121,6 +121,9 @@ class ScribeBot(commands.Bot):
         try:
             if not self.get_cog("OpsCog"):
                 await self.add_cog(OpsCog(self))
+                logging.getLogger("c1c-claims").info("OpsCog added in setup_hook")
+            else:
+                logging.getLogger("c1c-claims").info("OpsCog already present in setup_hook")
         except Exception:
             logging.getLogger("c1c-claims").exception("OpsCog setup failed")
 
