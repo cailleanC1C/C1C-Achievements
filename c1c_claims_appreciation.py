@@ -121,7 +121,6 @@ try:
     bot.remove_command("help")
 except Exception:
     pass
-bot.add_cog(OpsCog(bot))
 
 # ---------------- runtime config ----------------
 CFG = {
@@ -1328,6 +1327,13 @@ async def on_ready():
             _watchdog.start()
     except NameError:
         pass
+        
+    # --- register cogs (awaited, and only once) ---
+    try:
+        if "health" not in bot.all_commands:
+            await bot.add_cog(OpsCog(bot))
+    except Exception as e:
+        log.error(f"OpsCog load failed: {e}")
 
     # --- existing app boot work (logging + config load + auto refresh) ---
     log.info(f"Logged in as {bot.user} ({bot.user.id})")
