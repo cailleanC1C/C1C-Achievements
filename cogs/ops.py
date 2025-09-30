@@ -1,11 +1,11 @@
 # cogs/ops.py
 # Registers CoreOps commands via a cog, delegating rendering to claims/ops.py.
 
-import os, json
+import os
 import importlib
+import logging
 import discord
 from discord.ext import commands
-import logging
 
 log = logging.getLogger("c1c-claims")
 
@@ -92,8 +92,8 @@ class OpsCog(commands.Cog):
         # destinations + ok/— flags
         claims_txt = await app._fmt_chan_or_thread(ctx.guild, app.CFG.get("public_claim_thread_id"))
         levels_txt = await app._fmt_chan_or_thread(ctx.guild, app.CFG.get("levels_channel_id"))
-        audit_txt  = await app._fmt_chan_or_thread(ctx.guild, app.CFG.get("audit_log_channel_id"))
-        gk_txt     = app._fmt_role(ctx.guild, app.CFG.get("guardian_knights_role_id"))
+        audit_txt = await app._fmt_chan_or_thread(ctx.guild, app.CFG.get("audit_log_channel_id"))
+        gk_txt = app._fmt_role(ctx.guild, app.CFG.get("guardian_knights_role_id"))
 
         def _ok(s: str) -> str:
             s = str(s or "")
@@ -110,7 +110,8 @@ class OpsCog(commands.Cog):
             "config": {
                 "source": app.CONFIG_META.get("source") or "—",
                 "loaded_at": app.CONFIG_META["loaded_at"].strftime("%Y-%m-%d %H:%M UTC")
-                if app.CONFIG_META.get("loaded_at") else "—",
+                if app.CONFIG_META.get("loaded_at")
+                else "—",
             },
             "counts": {
                 "ach": len(app.ACHIEVEMENTS),
@@ -146,7 +147,7 @@ class OpsCog(commands.Cog):
                 "lvls": len(app.LEVELS),
                 "reasons": len(app.REASONS),
             }
-            emb = build_reload_embed(app.BOT_VERSION, app.CONFIG_META['source'], loaded_at, counts)
+            emb = build_reload_embed(app.BOT_VERSION, app.CONFIG_META["source"], loaded_at, counts)
             await app.safe_send_embed(ctx, emb)
         except Exception as e:
             await ctx.send(f"Reload failed: `{e}`")
@@ -170,14 +171,30 @@ class OpsCog(commands.Cog):
 
         items = [
             {"name": "General", "ok": True, "rows": 1, "headers": []},
-            {"name": "Achievements", "ok": len(app.ACHIEVEMENTS) > 0,
-             "rows": len(app.ACHIEVEMENTS), "headers": headers_from_rows(app.ACHIEVEMENTS.values())},
-            {"name": "Categories", "ok": len(app.CATEGORIES) > 0,
-             "rows": len(app.CATEGORIES), "headers": headers_from_rows(app.CATEGORIES)},
-            {"name": "Levels", "ok": app.LEVELS is not None,
-             "rows": len(app.LEVELS) if app.LEVELS is not None else 0, "headers": headers_from_rows(app.LEVELS)},
-            {"name": "Reasons", "ok": len(app.REASONS) > 0,
-             "rows": len(app.REASONS), "headers": ["code", "message"] if app.REASONS else []},
+            {
+                "name": "Achievements",
+                "ok": len(app.ACHIEVEMENTS) > 0,
+                "rows": len(app.ACHIEVEMENTS),
+                "headers": headers_from_rows(app.ACHIEVEMENTS.values()),
+            },
+            {
+                "name": "Categories",
+                "ok": len(app.CATEGORIES) > 0,
+                "rows": len(app.CATEGORIES),
+                "headers": headers_from_rows(app.CATEGORIES),
+            },
+            {
+                "name": "Levels",
+                "ok": app.LEVELS is not None,
+                "rows": len(app.LEVELS) if app.LEVELS is not None else 0,
+                "headers": headers_from_rows(app.LEVELS),
+            },
+            {
+                "name": "Reasons",
+                "ok": len(app.REASONS) > 0,
+                "rows": len(app.REASONS),
+                "headers": ["code", "message"] if app.REASONS else [],
+            },
         ]
 
         emb = build_checksheet_embed(app.BOT_VERSION, backend, items)
@@ -217,7 +234,6 @@ class OpsCog(commands.Cog):
             emb = build_rebooting_embed(app.BOT_VERSION)
             ack = await app.safe_send_embed(ctx, emb)
         except Exception:
-            # last-resort: plain text
             try:
                 ack = await ctx.send("Rebooting…")
             except Exception:
@@ -225,14 +241,18 @@ class OpsCog(commands.Cog):
 
         try:
             app.load_config()
-            loaded_at = app.CONFIG_META["loaded_at"].strftime("%Y-%m-%d %H:%M:%S UTC") if app.CONFIG_META.get("loaded_at") else "—"
+            loaded_at = (
+                app.CONFIG_META["loaded_at"].strftime("%Y-%m-%d %H:%M:%S UTC")
+                if app.CONFIG_META.get("loaded_at")
+                else "—"
+            )
             counts = {
                 "ach": len(app.ACHIEVEMENTS),
                 "cat": len(app.CATEGORIES),
                 "lvls": len(app.LEVELS),
                 "reasons": len(app.REASONS),
             }
-            done = build_reload_embed(app.BOT_VERSION, app.CONFIG_META.get("source","—"), loaded_at, counts)
+            done = build_reload_embed(app.BOT_VERSION, app.CONFIG_META.get("source", "—"), loaded_at, counts)
 
             if ack:
                 try:
