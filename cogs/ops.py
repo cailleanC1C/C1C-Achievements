@@ -1,17 +1,18 @@
 # cogs/ops.py
 # Registers CoreOps commands via a cog, delegating rendering to claims/ops.py.
 
-import os
+import os, json
 import importlib
 import discord
 from discord.ext import commands
 
 from claims.ops import (
     build_health_embed,
-    build_digest_embed,
-    build_config_embed,
+    build_digest_line,
     build_env_embed,
     build_checksheet_embed,
+    build_reload_embed,
+    build_rebooting_embed,
 )
 
 # Access the running main module (the monolith) for data/functions.
@@ -80,6 +81,15 @@ class OpsCog(commands.Cog):
             latency_ms = None
         last_age = app._last_event_age_s()
 
+        # destinations + ok/— flags
+        claims_txt = await app._fmt_chan_or_thread(ctx.guild, app.CFG.get("public_claim_thread_id"))
+        levels_txt = await app._fmt_chan_or_thread(ctx.guild, app.CFG.get("levels_channel_id"))
+        audit_txt  = await app._fmt_chan_or_thread(ctx.guild, app.CFG.get("audit_log_channel_id"))
+        gk_txt     = app._fmt_role(ctx.guild, app.CFG.get("guardian_knights_role_id"))
+        def _ok(s: str) -> str:
+            s = str(s or "")
+            return "ok" if (s and "unknown" not in s and s != "—") else "—"
+
         summary = {
             "runtime": {
                 "uptime": app.uptime_str(),
@@ -91,8 +101,7 @@ class OpsCog(commands.Cog):
             "config": {
                 "source": app.CONFIG_META.get("source") or "—",
                 "loaded_at": app.CONFIG_META["loaded_at"].strftime("%Y-%m-%d %H:%M UTC")
-                if app.CONFIG_META.get("loaded_at")
-                else "—",
+                if app.CONFIG_META.get("loaded_at") else "—",
             },
             "counts": {
                 "ach": len(app.ACHIEVEMENTS),
@@ -100,40 +109,36 @@ class OpsCog(commands.Cog):
                 "lvls": len(app.LEVELS),
                 "reasons": len(app.REASONS),
             },
-            "targets": {
-                "claims": await app._fmt_chan_or_thread(ctx.guild, app.CFG.get("public_claim_thread_id")),
-                "levels": await app._fmt_chan_or_thread(ctx.guild, app.CFG.get("levels_channel_id")),
-                "audit": await app._fmt_chan_or_thread(ctx.guild, app.CFG.get("audit_log_channel_id")),
-                "gk_role": app._fmt_role(ctx.guild, app.CFG.get("guardian_knights_role_id")),
-            },
-            "settings": {
-                "auto_refresh": int(os.getenv("CONFIG_AUTO_REFRESH_MINUTES", "0") or "0"),
-                "strict_probe": app.STRICT_PROBE,
-                "watchdog_check": app.WATCHDOG_CHECK_SEC,
-                "watchdog_max_disc": app.WATCHDOG_MAX_DISCONNECT_SEC,
+            "flags": {
+                "claims": _ok(claims_txt),
+                "levels": _ok(levels_txt),
+                "audit": _ok(audit_txt),
+                "gk_role": _ok(gk_txt),
             },
         }
-        legacy = []
-        if "testconfig" in app.bot.all_commands:
-            legacy.append("testconfig")
-        if "configstatus" in app.bot.all_commands:
-            legacy.append("configstatus")
-        if "reloadconfig" in app.bot.all_commands:
-            legacy.append("reloadconfig")
-        emb = build_digest_embed(app.BOT_VERSION, summary, legacy)
-        await app.safe_send_embed(ctx, emb)
+        line = build_digest_line(summary)
+        await ctx.send(line)
 
     @commands.command(name="reload")
     async def reload_cmd(self, ctx: commands.Context):
         if not app._is_staff(ctx.author):
             return await ctx.send("Staff only.")
         try:
+            try:
+                await ctx.message.add_reaction("🔁")
+            except Exception:
+                pass
+
             app.load_config()
             loaded_at = app.CONFIG_META["loaded_at"].strftime("%Y-%m-%d %H:%M:%S UTC")
-            await ctx.send(
-                f"🔁 Reloaded from **{app.CONFIG_META['source']}** at **{loaded_at}**. "
-                f"Ach={len(app.ACHIEVEMENTS)} Cat={len(app.CATEGORIES)} Lvls={len(app.LEVELS)}"
-            )
+            counts = {
+                "ach": len(app.ACHIEVEMENTS),
+                "cat": len(app.CATEGORIES),
+                "lvls": len(app.LEVELS),
+                "reasons": len(app.REASONS),
+            }
+            emb = build_reload_embed(app.BOT_VERSION, app.CONFIG_META['source'], loaded_at, counts)
+            await app.safe_send_embed(ctx, emb)
         except Exception as e:
             await ctx.send(f"Reload failed: `{e}`")
 
@@ -142,54 +147,51 @@ class OpsCog(commands.Cog):
         if not app._is_staff(ctx.author):
             return await ctx.send("Staff only.")
         backend = app.CONFIG_META.get("source") or "—"
-        tabs = [
-            ("General", True, "loaded"),
-            ("Achievements", len(app.ACHIEVEMENTS) > 0, f"{len(app.ACHIEVEMENTS)} rows"),
-            ("Categories", len(app.CATEGORIES) > 0, f"{len(app.CATEGORIES)} rows"),
-            ("Levels", True if app.LEVELS is not None else False, f"{len(app.LEVELS)} rows" if app.LEVELS is not None else "missing"),
-            ("Reasons", len(app.REASONS) > 0, f"{len(app.REASONS)} rows"),
+
+        def headers_from_rows(rows):
+            if not rows:
+                return []
+            keys = set()
+            for r in rows:
+                try:
+                    keys.update(list(r.keys()))
+                except Exception:
+                    pass
+            return sorted(keys)
+
+        items = [
+            {"name": "General", "ok": True, "rows": 1, "headers": []},
+            {"name": "Achievements", "ok": len(app.ACHIEVEMENTS) > 0,
+             "rows": len(app.ACHIEVEMENTS), "headers": headers_from_rows(app.ACHIEVEMENTS.values())},
+            {"name": "Categories", "ok": len(app.CATEGORIES) > 0,
+             "rows": len(app.CATEGORIES), "headers": headers_from_rows(app.CATEGORIES)},
+            {"name": "Levels", "ok": app.LEVELS is not None,
+             "rows": len(app.LEVELS) if app.LEVELS is not None else 0, "headers": headers_from_rows(app.LEVELS)},
+            {"name": "Reasons", "ok": len(app.REASONS) > 0,
+             "rows": len(app.REASONS), "headers": ["code", "message"] if app.REASONS else []},
         ]
-        status = {"backend": backend, "tabs": tabs}
-        emb = build_checksheet_embed(app.BOT_VERSION, status)
-        await app.safe_send_embed(ctx, emb)
 
-    @commands.command(name="env")
-    async def env_cmd(self, ctx: commands.Context):
-        if not app._is_staff(ctx.author):
-            return await ctx.send("Staff only.")
-        local = os.getenv("LOCAL_CONFIG_XLSX", "").strip()
-        env_info = {
-            "CONFIG_SHEET_ID": "set" if os.getenv("CONFIG_SHEET_ID") else "not set",
-            "SERVICE_ACCOUNT_JSON": "set" if os.getenv("SERVICE_ACCOUNT_JSON") else "not set",
-            "LOCAL_CONFIG_XLSX": (os.path.basename(local) if local else "not set"),
-            "CONFIG_AUTO_REFRESH_MINUTES": os.getenv("CONFIG_AUTO_REFRESH_MINUTES", "0"),
-            "STRICT_PROBE": "1" if app.STRICT_PROBE else "0",
-            "WATCHDOG_CHECK_SEC": str(app.WATCHDOG_CHECK_SEC),
-            "WATCHDOG_MAX_DISCONNECT_SEC": str(app.WATCHDOG_MAX_DISCONNECT_SEC),
-        }
-        emb = build_env_embed(app.BOT_VERSION, env_info)
-        await app.safe_send_embed(ctx, emb)
-
-    @commands.command(name="config")
-    async def config_cmd(self, ctx: commands.Context):
-        if not app._is_staff(ctx.author):
-            return await ctx.send("Staff only.")
-        loaded_at = app.CONFIG_META["loaded_at"].strftime("%Y-%m-%d %H:%M:%S UTC") if app.CONFIG_META.get("loaded_at") else "—"
-        snap = {
-            "source": app.CONFIG_META.get("source") or "—",
-            "loaded_at": loaded_at,
-            "claims": await app._fmt_chan_or_thread(ctx.guild, app.CFG.get("public_claim_thread_id")),
-            "levels": await app._fmt_chan_or_thread(ctx.guild, app.CFG.get("levels_channel_id")),
-            "audit": await app._fmt_chan_or_thread(ctx.guild, app.CFG.get("audit_log_channel_id")),
-            "gk_role": app._fmt_role(ctx.guild, app.CFG.get("guardian_knights_role_id")),
-            "counts": {"ach": len(app.ACHIEVEMENTS), "cat": len(app.CATEGORIES), "lvls": len(app.LEVELS)},
-        }
-        emb = build_config_embed(app.BOT_VERSION, snap)
+        emb = build_checksheet_embed(app.BOT_VERSION, backend, items)
         await app.safe_send_embed(ctx, emb)
 
     @commands.command(name="reboot")
     async def reboot_cmd(self, ctx: commands.Context):
         if not app._is_staff(ctx.author):
             return await ctx.send("Staff only.")
-        await ctx.send("♻️ Rebooting…")
+
+        try:
+            await ctx.message.add_reaction("🔁")
+        except Exception:
+            pass
+
+        emb = build_rebooting_embed(app.BOT_VERSION)
+        msg = await app.safe_send_embed(ctx, emb)
+
+        # hand off for post-boot edit
+        try:
+            with open("/tmp/c1c_claims_reboot.json", "w") as f:
+                json.dump({"channel_id": ctx.channel.id, "message_id": msg.id}, f)
+        except Exception:
+            pass
+
         await app._maybe_restart("manual reboot")
