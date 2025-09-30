@@ -5,6 +5,9 @@ import os, json
 import importlib
 import discord
 from discord.ext import commands
+import logging
+
+log = logging.getLogger("c1c-claims")
 
 from claims.ops import (
     build_health_embed,
@@ -21,6 +24,10 @@ app = importlib.import_module("__main__")
 class OpsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        try:
+            log.info("OpsCog loaded: commands=%s", ", ".join(sorted(bot.all_commands.keys())))
+        except Exception:
+            pass
 
     # ---------------- core ops commands (staff-only) ----------------
     @commands.command(name="health")
@@ -174,7 +181,7 @@ class OpsCog(commands.Cog):
         emb = build_checksheet_embed(app.BOT_VERSION, backend, items)
         await app.safe_send_embed(ctx, emb)
 
-@commands.command(name="reboot")
+@commands.command(name="reboot", aliases=["restart", "rb"])
 async def reboot_cmd(self, ctx: commands.Context):
     if not app._is_staff(ctx.author):
         return await ctx.send("Staff only.")
