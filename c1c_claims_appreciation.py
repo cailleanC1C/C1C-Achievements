@@ -7,7 +7,7 @@ import datetime as dt
 from typing import Optional, List, Dict, Tuple
 from functools import partial
 from urllib.parse import urlparse
-
+F
 import discord
 from discord.ext import commands
 from flask import Flask, jsonify
@@ -19,6 +19,7 @@ WATCHDOG_MAX_DISCONNECT_SEC=600
 import time, sys
 from collections import deque
 from discord.ext import tasks
+from claims.help import build_help_overview_embed, build_help_subtopic_embed
 
 # ---------------- keep-alive (Render web service) ----------------
 app = Flask(__name__)
@@ -105,6 +106,7 @@ except Exception:
 # ---------------- logging ----------------
 log = logging.getLogger("c1c-claims")
 logging.basicConfig(level=logging.INFO)
+BOT_VERSION = "1.0"
 
 # ---------------- discord client ----------------
 intents = discord.Intents.default()
@@ -1150,79 +1152,22 @@ async def ping(ctx: commands.Context):
     await ctx.send("🏓 Pong — Live and listening.")
 
 # ---------------- help (overview + subtopics, silent on unknown) ----------------
-HELP_COLOR = discord.Color.blurple()
-
-def _mk_help_embed_claims(guild: discord.Guild | None = None) -> discord.Embed:
-    e = discord.Embed(
-        title="🏆 C1C Appreciation & Claims — Help",
-        color=HELP_COLOR,
-        description=(
-            "Post your screenshot **in the public claims thread** to start a claim. "
-            "I’ll prompt you to pick a category and achievement; some claims auto-grant, "
-            "others summon **Guardian Knights** for review.\n\n"
-            "**Staff** can use the commands below for config and testing."
-        )
-    )
-    e.add_field(
-        name="How to claim (players)",
-        value=(
-            "1) Post a screenshot in the configured claims thread.\n"
-            "2) Use the buttons to choose category ➜ achievement.\n"
-            "3) If review is needed, GK will approve/deny or grant a different role."
-        ),
-        inline=False
-    )
-    e.add_field(
-        name="Staff commands",
-        value=(
-            "• `!testconfig` — show current config & sources\n"
-            "• `!configstatus` — short config summary\n"
-            "• `!reloadconfig` — reload Sheets/Excel config\n"
-            "• `!listach [filter]` — list loaded achievements\n"
-            "• `!findach <text>` — search achievements\n"
-            "• `!testach <key> [where]` — preview an achievement embed\n"
-            "• `!testlevel [query] [where]` — preview a level embed\n"
-            "• `!ping` — bot alive check"
-        ),
-        inline=False
-    )
-    e.set_footer(text=CFG.get("embed_footer_text", "C1C Achievements") or "C1C Achievements")
-    return e
-
 @bot.command(name="help")
 async def help_cmd(ctx: commands.Context, *, topic: str = None):
     topic = (topic or "").strip().lower()
 
-    # show overview if no topic given
     if not topic:
-        return await ctx.reply(embed=_mk_help_embed_claims(ctx.guild), mention_author=False)
+        return await ctx.reply(
+            embed=build_help_overview_embed(BOT_VERSION),
+            mention_author=False,
+        )
 
-    # subtopic blurbs
-    pages = {
-        "testconfig":     "`!testconfig`\nShow current configuration: targets, role ids, source & row counts.",
-        "configstatus":   "`!configstatus`\nShort one-line status: source, loaded time, counts.",
-        "reloadconfig":   "`!reloadconfig`\nReload configuration from Google Sheets or Excel.",
-        "listach":        "`!listach [filter]`\nList loaded achievement keys (optionally filtered).",
-        "findach":        "`!findach <text>`\nSearch achievements by key/name/category/text.",
-        "testach":        "`!testach <key> [where]`\nPreview a single achievement embed (optionally to another channel).",
-        "testlevel":      "`!testlevel [query] [where]`\nPreview a level-up embed (optionally to another channel).",
-        "ping":           "`!ping`\nSimple liveness check.",
-        # player-facing hints (aliases)
-        "claim":          "Post your screenshot **in the configured claims thread**. I’ll guide you via buttons.",
-        "claims":         "Same as `!help claim`.",
-        "gk":             "Guardian Knights review claims that need verification. They can approve/deny or grant a different role.",
-    }
-
-    txt = pages.get(topic)
-    if not txt:
-        # behave like unknown command: no chat reply, log only
+    emb = build_help_subtopic_embed(BOT_VERSION, topic)
+    if not emb:
         logging.getLogger("c1c-claims").warning("Unknown help topic requested: %s", topic)
         return
 
-    e = discord.Embed(title=f"!help {topic}", description=txt, color=HELP_COLOR)
-    e.set_footer(text=CFG.get("embed_footer_text", "C1C Achievements") or "C1C Achievements")
-    await ctx.reply(embed=e, mention_author=False)
-
+    await ctx.reply(embed=emb, mention_author=False)
 
 # ---------------- error reporter ----------------
 @bot.event
