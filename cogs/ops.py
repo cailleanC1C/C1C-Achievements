@@ -192,4 +192,5 @@ class OpsCog(commands.Cog):
     async def reboot_cmd(self, ctx: commands.Context):
         if not app._is_staff(ctx.author):
             return await ctx.send("Staff only.")
-        await ctx.send(
+        await ctx.send("♻️ Rebooting…")
+        await app._maybe_restart("manual reboot")
