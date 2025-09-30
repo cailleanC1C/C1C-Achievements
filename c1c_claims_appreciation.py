@@ -114,7 +114,17 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.guilds = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+
+class ScribeBot(commands.Bot):
+    async def setup_hook(self):
+        # register cogs before ready; idempotent on hot restarts
+        try:
+            if not self.get_cog("OpsCog"):
+                await self.add_cog(OpsCog(self))
+        except Exception:
+            logging.getLogger("c1c-claims").exception("OpsCog setup failed")
+
+bot = ScribeBot(command_prefix="!", intents=intents)
 
 # disable default help so we can own !help behavior
 try:
@@ -1331,16 +1341,6 @@ async def on_ready():
             _watchdog.start()
     except NameError:
         pass
-        
-    # --- register OpsCog (idempotent) ---
-    try:
-        if not bot.get_cog("OpsCog"):
-            await bot.add_cog(OpsCog(bot))
-            log.info("OpsCog registered.")
-        else:
-            log.info("OpsCog already loaded.")
-    except Exception:
-        log.exception("OpsCog load failed")
 
     # --- existing app boot work (logging + config load + auto refresh) ---
     log.info(f"Logged in as {bot.user} ({bot.user.id})")
