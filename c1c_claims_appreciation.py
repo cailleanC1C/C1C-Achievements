@@ -12,9 +12,9 @@ import discord
 from discord.ext import commands
 from flask import Flask, jsonify
 
-STRICT_PROBE=0                # keep Render happy: / and /ready always 200
-WATCHDOG_CHECK_SEC=60
-WATCHDOG_MAX_DISCONNECT_SEC=600
+STRICT_PROBE = 0  # keep Render happy: / and /ready always 200
+WATCHDOG_CHECK_SEC = 60
+WATCHDOG_MAX_DISCONNECT_SEC = 600
 
 import time, sys
 from collections import deque
@@ -89,7 +89,7 @@ WATCHDOG_MAX_DISCONNECT_SEC = int(os.getenv("WATCHDOG_MAX_DISCONNECT_SEC", "600"
 
 START_TS = time.time()
 def uptime_str():
-    s = int(time.time() - START_TS); h, s = divmod(s,3600); m, s = divmod(s,60)
+    s = int(time.time() - START_TS); h, s = divmod(s, 3600); m, s = divmod(s, 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 # ---------------- optional libs for config sources ----------------
@@ -383,7 +383,6 @@ async def safe_send_embed(dest, embed: discord.Embed, *, ping_user: Optional[dis
     except Exception as e:
         return await dest.send(f"Couldn’t send embed: `{e}`")
 
-
 def _resolve_target_channel(ctx: commands.Context, where: Optional[str]):
     if not where:
         ch = ctx.guild.get_channel(CFG.get("levels_channel_id") or 0)
@@ -563,9 +562,7 @@ def _buffer_item(guild: discord.Guild, user_id: int, role: discord.Role, ach: di
 
     e["task"] = asyncio.create_task(_delay())
 
-
 # ---------------- GK Review views ----------------
-
 class TryAgainView(discord.ui.View):
     def __init__(self, owner_id: int, att: Optional[discord.Attachment], claim_id: int):
         super().__init__(timeout=600)
@@ -613,13 +610,13 @@ class GKReview(discord.ui.View):
     async def approve(self, itx: discord.Interaction, _btn: discord.ui.Button):
         if not await self._only_gk(itx):
             return
-            
+
         ach = ACHIEVEMENTS.get(self.ach_key) or {}
         role = _get_role_by_config(itx.guild, ach)
         member = itx.guild.get_member(self.claimant_id) or await itx.guild.fetch_member(self.claimant_id)
         if role and member and role in member.roles:
             try:
-                 await itx.response.edit_message(content="**Already has this role.** No action needed.", view=None)
+                await itx.response.edit_message(content="**Already has this role.** No action needed.", view=None)
             except Exception:
                 pass
             return
@@ -648,7 +645,7 @@ class GKReview(discord.ui.View):
                 view=TryAgainView(self.claimant_id, self.att, claim_id=self.claim_id)
             )
             if self.claim_id:
-                CLAIM_STATE[self.claim_id] = "closed"  
+                CLAIM_STATE[self.claim_id] = "closed"
         except Exception:
             pass
 
@@ -712,8 +709,6 @@ class GKReview(discord.ui.View):
         sel.callback = _on_pick
         v.add_item(sel)
         await itx.response.send_message("Choose replacement role:", view=v, ephemeral=True)
-
-
 
 # ---------------- Pickers with claim-state awareness ----------------
 class BaseView(discord.ui.View):
@@ -807,7 +802,7 @@ class CategoryPicker(BaseView):
         except Exception: pass
         CLAIM_STATE[self.claim_id] = "canceled"
         self.stop()
-        await itx.channel.send(f"**Claim canceled by {itx.user.mention}.** No action needed.")
+        await itx.channel.send(f"**Claim canceled by {itx.user.mention}**. No action needed.")
 
     async def _pick_cat(self, itx: discord.Interaction, cat_key: str):
         await show_role_picker(itx, cat_key, self.att, self.batch, claim_id=self.claim_id)
@@ -951,7 +946,6 @@ async def finalize_grant(guild: discord.Guild, user_id: int, ach_key: str) -> bo
             )
         return False
 
-
     if CFG.get("audit_log_channel_id"):
         ch = guild.get_channel(CFG["audit_log_channel_id"])
         if ch:
@@ -981,7 +975,7 @@ async def process_claim(itx: discord.Interaction, ach_key: str,
         await itx.followup.send("That selection isn’t in my config. Try again or ping a Guardian Knight.", ephemeral=True)
         return
 
-    # 🔧 THIS WAS MISSING — without it, `role` below crashes
+    # 🔧 ensure role is resolvable
     role = _get_role_by_config(guild, ach)
     if not role:
         log.warning("[claim] role not configured for ach_key=%s (role_id=%s, display_name=%s)",
@@ -1049,6 +1043,52 @@ def _is_staff(member: discord.Member) -> bool:
     return bool(rid and any(r.id == rid for r in member.roles))
 
 # ---------------- admin/test commands ----------------
+@bot.command(name="testconfig")
+async def testconfig(cmdx: commands.Context):
+    if not _is_staff(cmdx.author):
+        return await cmdx.send("Staff only.")
+
+    thread_txt = await _fmt_chan_or_thread(cmdx.guild, CFG.get("public_claim_thread_id"))
+    levels_txt = await _fmt_chan_or_thread(cmdx.guild, CFG.get("levels_channel_id"))
+    audit_txt  = await _fmt_chan_or_thread(cmdx.guild, CFG.get("audit_log_channel_id"))
+    gk_txt     = _fmt_role(cmdx.guild, CFG.get("guardian_knights_role_id"))
+    loaded_at = CONFIG_META["loaded_at"].strftime("%Y-%m-%d %H:%M:%S UTC") if CONFIG_META["loaded_at"] else "—"
+
+    emb = discord.Embed(title="Current configuration", color=discord.Color.blurple())
+    if CFG.get("embed_author_name"):
+        icon = _safe_icon(CFG.get("embed_author_icon"))
+        if icon: emb.set_author(name=CFG["embed_author_name"], icon_url=icon)
+        else:    emb.set_author(name=CFG["embed_author_name"])
+    emb.add_field(name="Claims thread", value=thread_txt, inline=False)
+    emb.add_field(name="Levels channel", value=levels_txt, inline=False)
+    emb.add_field(name="Audit-log channel", value=audit_txt, inline=False)
+    emb.add_field(name="Guardian Knights role", value=gk_txt, inline=False)
+    emb.add_field(name="Source", value=f"{CONFIG_META['source']} — {loaded_at}", inline=False)
+    emb.add_field(
+        name="Loaded rows",
+        value=f"Achievements: **{len(ACHIEVEMENTS)}**\nCategories: **{len(CATEGORIES)}**\nLevels: **{len(LEVELS)}**",
+        inline=False,
+    )
+    await safe_send_embed(cmdx, emb)
+
+@bot.command(name="configstatus")
+async def configstatus(ctx: commands.Context):
+    if not _is_staff(ctx.author):
+        return await ctx.send("Staff only.")
+    loaded_at = CONFIG_META["loaded_at"].strftime("%Y-%m-%d %H:%M:%S UTC") if CONFIG_META["loaded_at"] else "—"
+    await ctx.send(f"Source: **{CONFIG_META['source']}** | Loaded: **{loaded_at}** | Ach={len(ACHIEVEMENTS)} Cat={len(CATEGORIES)} Lvls={len(LEVELS)}")
+
+@bot.command(name="reloadconfig")
+async def reloadconfig(ctx: commands.Context):
+    if not _is_staff(ctx.author):
+        return await ctx.send("Staff only.")
+    try:
+        load_config()
+        loaded_at = CONFIG_META["loaded_at"].strftime("%Y-%m-%d %H:%M:%S UTC")
+        await ctx.send(f"🔁 Reloaded from **{CONFIG_META['source']}** at **{loaded_at}**. Ach={len(ACHIEVEMENTS)} Cat={len(CATEGORIES)} Lvls={len(LEVELS)}")
+    except Exception as e:
+        await ctx.send(f"Reload failed: `{e}`")
+
 @bot.command(name="listach")
 async def listach(ctx: commands.Context, filter_text: str = ""):
     if not _is_staff(ctx.author):
@@ -1117,29 +1157,65 @@ async def testlevel(ctx: commands.Context, *, args: str = ""):
 
 @bot.command(name="ping")
 async def ping(ctx: commands.Context):
-    # react-only liveness check
+    # react-only liveness check (global)
     try:
         await ctx.message.add_reaction("🏓")
     except Exception:
         pass
 
-# ---------------- help (overview + subtopics, silent on unknown) ----------------
+# ---------------- help (overview + subtopics, admin can use plain !help) ----------------
 @bot.command(name="help")
 async def help_cmd(ctx: commands.Context, *, topic: str = None):
+    # gating for non-staff handled in on_message (prefix prompt). Admins reach here freely.
     topic = (topic or "").strip().lower()
-
     if not topic:
-        return await ctx.reply(
-            embed=build_help_overview_embed(BOT_VERSION),
-            mention_author=False,
-        )
-
+        return await ctx.reply(embed=build_help_overview_embed(BOT_VERSION), mention_author=False)
     emb = build_help_subtopic_embed(BOT_VERSION, topic)
     if not emb:
         logging.getLogger("c1c-claims").warning("Unknown help topic requested: %s", topic)
         return
-
     await ctx.reply(embed=emb, mention_author=False)
+
+# ---------------- prefix policy (CoreOps) ----------------
+COREOPS_NAMES = {"health", "digest", "reload", "checksheet", "env", "reboot", "restart", "rb", "help"}
+# Configure prefixes via env; falls back to these four.
+BOT_PREFIXES = [s.strip() for s in (os.getenv("COREOPS_PREFIXES", "acr,rmd,mod,mm").split(",")) if s.strip()]
+
+def _prefix_menu(cmd: str) -> str:
+    opts = " • ".join(f"`!{p} {cmd}`" for p in BOT_PREFIXES)
+    return (f"Which bot should run **{cmd}**?\n"
+            f"Use a prefix: {opts}\n"
+            f"(Admins can run `!{cmd}` directly.)")
+
+@bot.group(name="acr", invoke_without_command=True, case_insensitive=True)
+async def acr(ctx: commands.Context, *, rest: str = ""):
+    """
+    Namespaced CoreOps for this bot: e.g. !acr health, !acr digest, !acr env, !acr reboot
+    Also supports: !acr help [topic]
+    """
+    # normalize
+    rest = (rest or "").strip()
+    if not rest or rest.lower().startswith("help"):
+        topic = rest.split(" ", 1)[1].strip() if " " in rest else ""
+        # route to our !help (works for admins & non-admins via prefix)
+        return await ctx.invoke(bot.get_command("help"), topic=topic or None)
+
+    parts = rest.split(None, 1)
+    cmd = parts[0].lower()
+    arg = parts[1] if len(parts) > 1 else None
+
+    alias = {"restart": "reboot", "rb": "reboot"}
+    cmd_norm = alias.get(cmd, cmd)
+    if cmd_norm not in COREOPS_NAMES:
+        return await ctx.reply(f"Unknown CoreOps command `{cmd}`. Try `!acr help`.", mention_author=False)
+
+    # invoke the underlying command (the OpsCog one)
+    target = bot.get_command(cmd_norm)
+    if not target:
+        return await ctx.reply("Command is not available right now.", mention_author=False)
+    if cmd_norm == "help":
+        return await ctx.invoke(target, topic=(arg or None))
+    return await ctx.invoke(target)
 
 # ---------------- error reporter ----------------
 @bot.event
@@ -1167,14 +1243,13 @@ async def on_resumed():
     BOT_CONNECTED = True
     _mark_event()
 
-
 @bot.event
 async def on_disconnect():
     global BOT_CONNECTED, _LAST_DISCONNECT_TS
     BOT_CONNECTED = False
     _LAST_DISCONNECT_TS = _now()
-    
-# ---------------- message listener ----------------
+
+# ---------------- watchdog restart helper ----------------
 async def _maybe_restart(reason: str):
     try:
         print(f"[WATCHDOG] Restarting: {reason}", flush=True)
@@ -1208,7 +1283,6 @@ async def _watchdog():
     if (now - _LAST_DISCONNECT_TS) > WATCHDOG_MAX_DISCONNECT_SEC:
         await _maybe_restart(f"disconnected too long: {int(now - _LAST_DISCONNECT_TS)}s")
 
-
 # ---------------- message listener ----------------
 @bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
@@ -1236,6 +1310,24 @@ async def on_member_update(before: discord.Member, after: discord.Member):
 async def on_message(msg: discord.Message):
     if msg.author.bot:
         return
+
+    # ---- CoreOps prefix policy ----
+    try:
+        content = (msg.content or "").strip()
+        if content.startswith("!"):
+            # token immediately after "!"
+            token = content[1:].split(None, 1)[0].lower()
+            # if a plain core-ops command (and NOT staff), prompt for prefix instead of executing
+            if (token in COREOPS_NAMES) and (not _is_staff(msg.author)):
+                # allow !ping globally
+                if token == "help":
+                    await msg.reply(_prefix_menu("help"), mention_author=False)
+                    return
+                await msg.reply(_prefix_menu(token), mention_author=False)
+                return
+    except Exception:
+        pass
+
     await bot.process_commands(msg)
 
     # Levels auto-response (optional)
