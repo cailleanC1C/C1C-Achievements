@@ -7,7 +7,7 @@ import datetime as dt
 from typing import Optional, List, Dict, Tuple
 from functools import partial
 from urllib.parse import urlparse
-F
+
 import discord
 from discord.ext import commands
 from flask import Flask, jsonify
