@@ -74,18 +74,28 @@ def build_health_embed(bot_version: str, summary: dict) -> discord.Embed:
     e.set_footer(text=f"Bot v{bot_version} • CoreOps v1 • {_vienna_now_str()}")
     return e
 
+def build_digest_line(summary: dict) -> str:
+    """Return a single-line, scheduler-friendly digest string."""
+    rt  = summary.get("runtime", {})
+    cfg = summary.get("config", {})
+    cnt = summary.get("counts", {})
+    flg = summary.get("flags", {})
 
-def build_digest_embed(bot_version: str, summary: dict, legacy_commands: list) -> discord.Embed:
-    e = build_health_embed(bot_version, summary)
-    if legacy_commands:
-        e.add_field(
-            name="Legacy staff commands present",
-            value=", ".join(legacy_commands),
-            inline=False,
-        )
-    e.title = "🏆 Appreciation & Claims — Digest"
-    return e
+    ready  = "True" if rt.get("ready") else "False"
+    lat_ms = rt.get("latency_ms")
+    last_s = rt.get("last_event_age_s")
+    src    = cfg.get("source", "—")
+    when   = cfg.get("loaded_at", "—")
 
+    def _fmt(v): return str(v) if v is not None else "—"
+
+    return (
+        "🏆 Claims digest — "
+        f"ready:{ready} | latency:{_fmt(lat_ms)}ms | last_event:{_fmt(last_s)}s | "
+        f"cfg:{src} @ {when} | "
+        f"ach:{cnt.get('ach', 0)} cat:{cnt.get('cat', 0)} lvls:{cnt.get('lvls', 0)} reasons:{cnt.get('reasons', 0)} | "
+        f"claims_thread:{flg.get('claims','—')} levels:{flg.get('levels','—')} audit:{flg.get('audit','—')} GK:{flg.get('gk_role','—')}"
+    )
 
 def build_config_embed(bot_version: str, config_snapshot: dict) -> discord.Embed:
     # config_snapshot: {source, loaded_at, claims, levels, audit, gk_role, counts:{ach,cat,lvls}}
@@ -120,20 +130,49 @@ def build_env_embed(bot_version: str, env_info: dict) -> discord.Embed:
     return e
 
 
-def build_checksheet_embed(bot_version: str, status: dict) -> discord.Embed:
-    # status: backend, tabs=[(name, ok, note), ...]
-    e = discord.Embed(title="Config check", color=discord.Color.blurple())
-    e.add_field(name="Backend", value=f"**{status.get('backend', '—')}**", inline=False)
+def build_checksheet_embed(bot_version: str, backend: str, items: list[dict]) -> discord.Embed:
+    """
+    items = [
+      {"name":"General",     "ok": True,  "rows": 1,                    "headers": []},
+      {"name":"Achievements","ok": True,  "rows": 29,                   "headers": ["key","display_name",...]} ,
+      {"name":"Categories",  "ok": True,  "rows": 8,                    "headers": [...]},
+      {"name":"Levels",      "ok": True,  "rows": 10,                   "headers": [...]},
+      {"name":"Reasons",     "ok": True,  "rows": 5,                    "headers": ["code","message"]},
+    ]
+    """
+    e = discord.Embed(title="Checksheet — Tabs & Headers", color=discord.Color.blurple())
+    e.add_field(name="Backend", value=f"**{backend}**", inline=False)
 
-    tabs = status.get("tabs") or []
-    if tabs:
-        lines = []
-        for name, ok, note in tabs:
-            mark = "✅" if ok else "⚠️"
-            lines.append(f"{mark} **{name}** — {note}")
-        e.add_field(name="Worksheets", value="\n".join(lines), inline=False)
-    else:
-        e.add_field(name="Worksheets", value="—", inline=False)
+    for it in items:
+        mark = "✅" if it.get("ok") else "⚠️"
+        name = it.get("name", "—")
+        rows = it.get("rows", 0)
+        headers = it.get("headers") or []
+        h_txt = ", ".join(headers) if headers else "—"
+        e.add_field(
+            name=f"{mark} {name} — {rows} rows",
+            value=f"**Headers:** {h_txt}\n**Rows:** {rows}",
+            inline=False
+        )
 
+    # footer
     e.set_footer(text=f"Bot v{bot_version} • CoreOps v1 • {_vienna_now_str()}")
     return e
+
+def build_reload_embed(bot_version: str, source: str, loaded_at: str, counts: dict) -> discord.Embed:
+    e = discord.Embed(title="Reloaded config", color=discord.Color.blurple())
+    e.description = f"**{source}** — {loaded_at}"
+    e.add_field(
+        name="Counts",
+        value=f"Ach={counts.get('ach',0)} • Cat={counts.get('cat',0)} • Lvls={counts.get('lvls',0)} • Reasons={counts.get('reasons',0)}",
+        inline=False
+    )
+    e.set_footer(text=f"Bot v{bot_version} • CoreOps v1 • {_vienna_now_str()}")
+    return e
+
+
+def build_rebooting_embed(bot_version: str) -> discord.Embed:
+    e = discord.Embed(title="Rebooting…", color=discord.Color.blurple())
+    e.set_footer(text=f"Bot v{bot_version} • CoreOps v1 • {_vienna_now_str()}")
+    return e
+
