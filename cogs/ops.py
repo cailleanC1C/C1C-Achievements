@@ -174,24 +174,37 @@ class OpsCog(commands.Cog):
         emb = build_checksheet_embed(app.BOT_VERSION, backend, items)
         await app.safe_send_embed(ctx, emb)
 
-    @commands.command(name="reboot")
-    async def reboot_cmd(self, ctx: commands.Context):
-        if not app._is_staff(ctx.author):
-            return await ctx.send("Staff only.")
+@commands.command(name="reboot")
+async def reboot_cmd(self, ctx: commands.Context):
+    if not app._is_staff(ctx.author):
+        return await ctx.send("Staff only.")
 
+    # react immediately so callers see liveness
+    try:
+        await ctx.message.add_reaction("🔁")
+    except Exception:
+        pass
+
+    # show "Rebooting…" then perform a soft restart (reload config)
+    emb = build_rebooting_embed(app.BOT_VERSION)
+    ack = await app.safe_send_embed(ctx, emb)
+
+    try:
+        app.load_config()
+        loaded_at = app.CONFIG_META["loaded_at"].strftime("%Y-%m-%d %H:%M:%S UTC") if app.CONFIG_META.get("loaded_at") else "—"
+        counts = {
+            "ach": len(app.ACHIEVEMENTS),
+            "cat": len(app.CATEGORIES),
+            "lvls": len(app.LEVELS),
+            "reasons": len(app.REASONS),
+        }
+        done = build_reload_embed(app.BOT_VERSION, app.CONFIG_META.get("source","—"), loaded_at, counts)
+        # edit the previous message to a success state (Reminder-style)
         try:
-            await ctx.message.add_reaction("🔁")
+            await ack.edit(content="🔄 Reloaded config. Ready.", embed=done)
         except Exception:
-            pass
+            # if edit fails, just post a fresh message
+            await app.safe_send_embed(ctx, done)
+    except Exception as e:
+        await ctx.send(f"Reboot failed: `{e}`")
 
-        emb = build_rebooting_embed(app.BOT_VERSION)
-        msg = await app.safe_send_embed(ctx, emb)
-
-        # hand off for post-boot edit
-        try:
-            with open("/tmp/c1c_claims_reboot.json", "w") as f:
-                json.dump({"channel_id": ctx.channel.id, "message_id": msg.id}, f)
-        except Exception:
-            pass
-
-        await app._maybe_restart("manual reboot")
