@@ -1,6 +1,7 @@
 # claims/help.py
 # Help embed builders for C1C Appreciation & Claims
 
+import os
 import discord
 from datetime import datetime
 
@@ -10,7 +11,6 @@ except Exception:
     ZoneInfo = None
 
 HELP_COLOR = discord.Color.blurple()
-
 
 def _vienna_now_str() -> str:
     """Return 'YYYY-MM-DD HH:MM Europe/Vienna' (fallback to UTC on any issue)."""
@@ -23,9 +23,16 @@ def _vienna_now_str() -> str:
     # Fallback (should rarely happen)
     return datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
+def _prefixes_str() -> str:
+    """Show available CoreOps prefixes (env COREOPS_PREFIXES or defaults)."""
+    raw = os.getenv("COREOPS_PREFIXES", "acr,rmd,mod,mm")
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    if not parts:
+        parts = ["acr", "rmd", "mod", "mm"]
+    return ", ".join(parts)
 
 def build_help_overview_embed(bot_version: str) -> discord.Embed:
-    """Overview help page – reflects current live commands."""
+    """Overview help page, updated for prefix policy."""
     e = discord.Embed(
         title="🏆 C1C Appreciation & Claims — Help",
         color=HELP_COLOR,
@@ -33,10 +40,9 @@ def build_help_overview_embed(bot_version: str) -> discord.Embed:
             "Post your screenshot **in the public claims thread** to start a claim. "
             "I’ll prompt you to pick a category and achievement; some claims auto-grant, "
             "others summon **Guardian Knights** for review.\n\n"
-            "**Staff** can use the ops & testing commands below."
+            "**Admins** can run CoreOps with plain commands. **Everyone else** must use a **prefix**."
         ),
     )
-
     e.add_field(
         name="How to claim (players)",
         value=(
@@ -46,23 +52,26 @@ def build_help_overview_embed(bot_version: str) -> discord.Embed:
         ),
         inline=False,
     )
-
     e.add_field(
-        name="Ops (staff only)",
+        name="CoreOps (admins: plain `!cmd`, others: use a prefix)",
         value=(
-            "• `!health` — detailed health & config snapshot (embed)\n"
-            "• `!digest` — one-line heartbeat for quick/scheduled checks\n"
-            "• `!env` — effective environment config (masked where needed)\n"
-            "• `!checksheet` — sheet tabs status, row counts, headers\n"
-            "• `!reload` — reload configuration (🔁 reacts, styled result)\n"
-            "• `!reboot` — soft reboot: show *Rebooting…*, then edited reload result"
+            f"Prefixes: `{_prefixes_str()}` — e.g., `!acr health`\n"
+            "• `health` — runtime + config status (embed)\n"
+            "• `digest` — short one-line status\n"
+            "• `checksheet` — sheets/files sanity check (embed)\n"
+            "• `reload` — reload config (embed)\n"
+            "• `reboot` (`restart`, `rb`) — ‘reboot’ message then reload + edit (embed)\n"
+            "• `env` — environment snapshot (embed)\n"
+            "• `ping` — global react-only liveness check (no prefix needed)"
         ),
         inline=False,
     )
-
     e.add_field(
-        name="Testing (staff only)",
+        name="Staff / testing tools",
         value=(
+            "• `!testconfig` — show current config & sources\n"
+            "• `!configstatus` — short config summary\n"
+            "• `!reloadconfig` — reload Sheets/Excel config\n"
             "• `!listach [filter]` — list loaded achievements\n"
             "• `!findach <text>` — search achievements\n"
             "• `!testach <key> [where]` — preview an achievement embed\n"
@@ -70,38 +79,43 @@ def build_help_overview_embed(bot_version: str) -> discord.Embed:
         ),
         inline=False,
     )
-
     e.add_field(
-        name="Utilities",
-        value="• `!ping` — liveness check (reacts with 🏓)",
+        name="GK notes",
+        value="**Guardian Knights** can approve/deny or grant a different role during verification.",
         inline=False,
     )
-
     e.set_footer(text=f"Bot v{bot_version} • CoreOps v1 • {_vienna_now_str()}")
     return e
 
-
 def build_help_subtopic_embed(bot_version: str, topic: str) -> discord.Embed | None:
     """Subpage for !help <topic>. Returns None for unknown topics (caller stays silent)."""
+    px = _prefixes_str().split(",")[0].strip() or "acr"  # sample prefix for examples
+
     pages = {
-        # ops
-        "health":   "`!health`\nEmbed with runtime (uptime, latency, last event age), gateway, config source/loaded time, target channels/roles, and row counts.",
-        "digest":   "`!digest`\nOne-line heartbeat: uptime, latency, last event age, counts, and OK/— flags for channels/roles.",
-        "env":      "`!env`\nShow relevant environment variables used by the bot (safely summarized).",
-        "checksheet": "`!checksheet`\nSummarize tabs loaded from the sheet (General, Achievements, Categories, Levels, Reasons) with row counts and visible headers.",
-        "reload":   "`!reload`\nReload configuration from Google Sheets or Excel. Adds a 🔁 reaction and returns a styled result embed.",
-        "reboot":   "`!reboot`\nSoft reboot UX: reacts 🔁, posts *Rebooting…*, then edits with the reload result embed.",
-        # testing
-        "listach":  "`!listach [filter]`\nList loaded achievement keys (optionally filter by substring).",
-        "findach":  "`!findach <text>`\nSearch achievements by key/name/category/text.",
-        "testach":  "`!testach <key> [where]`\nPreview a single achievement embed (optionally to another channel).",
-        "testlevel":"`!testlevel [query] [where]`\nPreview a level-up embed (optionally to another channel).",
-        # utilities
-        "ping":     "`!ping`\nSimple liveness check — reacts to your message with 🏓.",
-        # player-facing aliases
-        "claim":    "Post your screenshot **in the configured claims thread**. I’ll guide you via buttons.",
-        "claims":   "Same as `!help claim`.",
-        "gk":       "Guardian Knights review claims that need verification. They can approve/deny or grant a different role.",
+        # CoreOps
+        "health":      f"`!health` (admin) or `!{px} health`\nShow runtime & config status in an embed.",
+        "digest":      f"`!digest` (admin) or `!{px} digest`\nConcise one-liner status.",
+        "checksheet":  f"`!checksheet` (admin) or `!{px} checksheet`\nSanity check of config sheets/files.",
+        "reload":      f"`!reload` (admin) or `!{px} reload`\nReload configuration and report counts.",
+        "reboot":      f"`!reboot` (admin) or `!{px} reboot`\nPost ‘Rebooting…’ then edit with reload result.",
+        "restart":     f"Alias of **reboot**. Use `!reboot` / `!{px} reboot`.",
+        "rb":          f"Alias of **reboot**. Use `!reboot` / `!{px} reboot`.",
+        "env":         f"`!env` (admin) or `!{px} env`\nShow environment snapshot (safe subset).",
+        "ping":        "`!ping` — Reacts with 🏓 to confirm liveness (global, no prefix needed).",
+
+        # Staff/testing
+        "testconfig":  "`!testconfig`\nShow current configuration: targets, role ids, source & row counts.",
+        "configstatus":"`!configstatus`\nShort one-line status: source, loaded time, counts.",
+        "reloadconfig":"`!reloadconfig`\nReload configuration from Google Sheets or Excel.",
+        "listach":     "`!listach [filter]`\nList loaded achievement keys (optionally filtered).",
+        "findach":     "`!findach <text>`\nSearch achievements by key/name/category/text.",
+        "testach":     "`!testach <key> [where]`\nPreview a single achievement embed (optionally to another channel).",
+        "testlevel":   "`!testlevel [query] [where]`\nPreview a level-up embed (optionally to another channel).",
+
+        # Player-facing hints
+        "claim":  "Post your screenshot **in the configured claims thread**. I’ll guide you via buttons.",
+        "claims": "Same as `!help claim`.",
+        "gk":     "Guardian Knights review claims that need verification. They can approve/deny or grant a different role.",
     }
     txt = pages.get(topic)
     if not txt:
