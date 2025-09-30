@@ -1332,12 +1332,15 @@ async def on_ready():
     except NameError:
         pass
         
-    # --- register cogs (awaited, and only once) ---
+    # --- register OpsCog (idempotent) ---
     try:
-        if "health" not in bot.all_commands:
+        if not bot.get_cog("OpsCog"):
             await bot.add_cog(OpsCog(bot))
-    except Exception as e:
-        log.error(f"OpsCog load failed: {e}")
+            log.info("OpsCog registered.")
+        else:
+            log.info("OpsCog already loaded.")
+    except Exception:
+        log.exception("OpsCog load failed")
 
     # --- existing app boot work (logging + config load + auto refresh) ---
     log.info(f"Logged in as {bot.user} ({bot.user.id})")
