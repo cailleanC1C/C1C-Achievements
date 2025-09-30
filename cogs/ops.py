@@ -186,8 +186,16 @@ async def reboot_cmd(self, ctx: commands.Context):
         pass
 
     # show "Rebooting…" then perform a soft restart (reload config)
-    emb = build_rebooting_embed(app.BOT_VERSION)
-    ack = await app.safe_send_embed(ctx, emb)
+    ack = None
+    try:
+        emb = build_rebooting_embed(app.BOT_VERSION)
+        ack = await app.safe_send_embed(ctx, emb)
+    except Exception:
+        # last-resort: plain text
+        try:
+            ack = await ctx.send("Rebooting…")
+        except Exception:
+            pass
 
     try:
         app.load_config()
@@ -199,12 +207,13 @@ async def reboot_cmd(self, ctx: commands.Context):
             "reasons": len(app.REASONS),
         }
         done = build_reload_embed(app.BOT_VERSION, app.CONFIG_META.get("source","—"), loaded_at, counts)
-        # edit the previous message to a success state (Reminder-style)
-        try:
-            await ack.edit(content="🔄 Reloaded config. Ready.", embed=done)
-        except Exception:
-            # if edit fails, just post a fresh message
+
+        if ack:
+            try:
+                await ack.edit(content="🔄 Reloaded config. Ready.", embed=done)
+            except Exception:
+                await app.safe_send_embed(ctx, done)
+        else:
             await app.safe_send_embed(ctx, done)
     except Exception as e:
         await ctx.send(f"Reboot failed: `{e}`")
-
