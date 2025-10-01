@@ -4,4 +4,4 @@ services:
     env: python
     plan: free
     buildCommand: ""
-    startCommand: python level_whisper_bot.py
+    startCommand: python c1c_claims_appreciation.py
