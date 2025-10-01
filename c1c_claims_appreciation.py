@@ -703,9 +703,9 @@ class CategoryPicker(BaseView):
         except Exception:
             cid = ""
         if cid.startswith("cat:"):
-            ach_key_prefix = cid.split(":", 1)[1] + ":"
-            # build per-category options as a role picker
-            await show_role_picker(itx, ach_key_prefix, self.attachment, claim_id=self.claim_id)
+            cat_key = cid.split(":", 1)[1]
+            # build per-category options as a role picker (filter by sheet 'category')
+            await show_role_picker(itx, cat_key, self.attachment, claim_id=self.claim_id)
             return False
         return True
 
@@ -754,13 +754,20 @@ async def show_category_picker(itx: discord.Interaction, attachment: Optional[di
     except discord.InteractionResponded:
         await itx.edit_original_response(content="**Claim your achievement**\nTap a category to continue.", view=v)
 
-async def show_role_picker(itx: discord.Interaction, ach_key_prefix: str,
+async def show_role_picker(itx: discord.Interaction, cat_key: str,
                            attachment: Optional[discord.Attachment], claim_id: int = 0):
-    # collect all achievements starting with the chosen category prefix
-    choices = [(k, r) for k, r in ACHIEVEMENTS.items() if k.startswith(ach_key_prefix)]
+    # collect all achievements with this sheet 'category'
+    ck = (cat_key or "").strip().lower()
+    choices = []
+    for k, r in ACHIEVEMENTS.items():
+        rc = (r.get("category") or "").strip().lower()
+        if rc == ck:
+            choices.append((k, r))
+
     if not choices:
         await itx.response.send_message("No achievements in this category.", ephemeral=True)
         return
+
     v = RolePicker(itx.user.id, choices=choices, att=attachment, claim_id=claim_id)
     try:
         await itx.response.edit_message(content="**Select your achievement**", view=v)
