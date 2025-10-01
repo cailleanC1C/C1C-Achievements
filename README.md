@@ -51,6 +51,32 @@ Typing a bare command like `!health` prompts you to pick which bot you mean.
 
 ---
 
+## Commands
+
+### Admin / Ops (scoped to `!sc`)
+
+* `!sc health` — Show full health info (version, config source, table counts, status line).
+* `!sc digest` — Quick one-liner health digest.
+* `!sc reload` — Reload configuration from Sheets or local file.
+* `!sc checksheet` — Show which Google Sheet (or local file) is active.
+* `!sc env` — Show key environment variables (secrets redacted).
+
+### Guardian Knight & Claim Flow
+
+* `!help claim` / `!help claims` — Help topics on how to post and review claims.
+* `!help gk` — Guardian Knight help overview.
+
+### Preview / Testing
+
+* `!testach <key> [where]` — Preview an achievement appreciation post.
+* `!testlevel [query] [where]` — Preview a level-up appreciation post.
+
+### Global
+
+* `!ping` — Quick alive check (react only).
+
+---
+
 ## How it works
 
 * Members earn roles for achievements, milestones, or special champion unlocks.
