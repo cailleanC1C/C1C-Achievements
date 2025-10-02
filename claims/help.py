@@ -123,3 +123,23 @@ def build_help_subtopic_embed(bot_version: str, topic: str) -> discord.Embed | N
     e = discord.Embed(title=f"!help {topic}", description=txt, color=HELP_COLOR)
     e.set_footer(text=f"Bot v{bot_version} • CoreOps v1 • {_vienna_now_str()}")
     return e
+
+async def setup(bot):
+    # ensure we own !help
+    try:
+        bot.remove_command("help")
+    except Exception:
+        pass
+
+    import os
+
+    @bot.command(name="help")
+    async def help_cmd(ctx, *, topic: str | None = None):
+        ver = os.getenv("BOT_VERSION", "dev")
+        topic_norm = (topic or "").strip().lower()
+        if topic_norm:
+            e = build_help_subtopic_embed(ver, topic_norm)
+            if e:
+                return await ctx.reply(embed=e, mention_author=False)
+            return  # silent on unknown
+        await ctx.reply(embed=build_help_overview_embed(ver), mention_author=False)
