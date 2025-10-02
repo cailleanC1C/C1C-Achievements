@@ -98,7 +98,8 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.guilds = True
-bot = commands.Bot(command_prefix=get_prefix, intents=intents)
+bot = commands.Bot(command_prefix=get_prefix, intents=intents, strip_after_prefix=True)
+# Ensure prefixes like "!sc" accept a space-separated command (e.g., "!sc health").
 
 # disable default help so we can own !help behavior
 try:
