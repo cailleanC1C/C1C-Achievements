@@ -244,26 +244,18 @@ async def _load_ext(name: str) -> bool:
         log.warning(f"[cogs] failed {name}: {e}")
         return False
 
-async def load_cogs():
-    # Help (you have: claims/middleware/help.py)
-    await _load_ext("claims.middleware.help")
-
-    # CoreOps — prefer cogs/ops.py, fall back to claims/middleware/ops.py if needed
-    loaded = await _load_ext("cogs.ops")
-    if not loaded:
-        await _load_ext("claims.middleware.ops")
-
 @bot.event
 async def setup_hook():
-    async def _load(name):
+    for ext in ("cogs.ops", "claims.middleware.coreops_prefix", "claims.middleware.help"):
         try:
-            await bot.load_extension(name)
-            log.info(f"[cogs] loaded {name}")
+            # Try async loader (newer d.py). If it's sync on 2.3.x, fall back.
+            try:
+                await bot.load_extension(ext)   # raises TypeError on 2.3.x
+            except TypeError:
+                bot.load_extension(ext)         # sync path for 2.3.x
+            log.info(f"[cogs] loaded {ext}")
         except Exception as e:
-            log.warning(f"[cogs] failed {name}: {e}")
-
-    await _load("cogs.ops")
-    await _load("claims.middleware.coreops_prefix")  # optional router
+            log.warning(f"[cogs] failed {ext}: {e}")
 
 # ---------------- helpers ----------------
 def _is_image(att: discord.Attachment) -> bool:
@@ -1110,6 +1102,39 @@ def _is_staff(member: discord.Member) -> bool:
         return True
     rid = CFG.get("guardian_knights_role_id")
     return bool(rid and any(r.id == rid for r in member.roles))
+
+# ---------------- help ----------------
+@bot.command(name="help")
+async def help_cmd(ctx: commands.Context, *, topic: str = None):
+    topic = (topic or "").strip().lower()
+
+    # show overview if no topic given
+    if not topic:
+        return await ctx.reply(embed=_mk_help_embed_claims(ctx.guild), mention_author=False)
+
+    pages = {
+        "testconfig":     "`!testconfig`\nShow current configuration: targets, role ids, source & row counts.",
+        "configstatus":   "`!configstatus`\nShort one-line status: source, loaded time, counts.",
+        "reloadconfig":   "`!reloadconfig`\nReload configuration from Google Sheets or Excel.",
+        "listach":        "`!listach [filter]`\nList loaded achievement keys (optionally filtered).",
+        "findach":        "`!findach <text>`\nSearch achievements by key/name/category/text.",
+        "testach":        "`!testach <key> [where]`\nPreview a single achievement embed (optionally to another channel).",
+        "testlevel":      "`!testlevel [query] [where]`\nPreview a level-up embed (optionally to another channel).",
+        "flushpraise":    "`!flushpraise`\nForce-post any buffered praise in this server.",
+        "ping":           "`!ping`\nSimple liveness check.",
+        "claim":          "Post your screenshot **in the configured claims thread**. I’ll guide you via buttons.",
+        "claims":         "Same as `!help claim`.",
+        "gk":             "Guardian Knights review claims that need verification. They can approve/deny or grant a different role.",
+    }
+
+    txt = pages.get(topic)
+    if not txt:
+        logging.getLogger("c1c-claims").warning("Unknown help topic requested: %s", topic)
+        return
+
+    e = discord.Embed(title=f"!help {topic}", description=txt, color=HELP_COLOR)
+    e.set_footer(text=CFG.get("embed_footer_text", "C1C Achievements") or "C1C Achievements")
+    await ctx.reply(embed=e, mention_author=False)
 
 # ---------------- admin/test commands ----------------
 @bot.command(name="testconfig")
