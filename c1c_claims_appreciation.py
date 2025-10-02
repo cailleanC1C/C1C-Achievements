@@ -1452,6 +1452,13 @@ async def on_ready():
     if mins > 0 and _AUTO_REFRESH_TASK is None:
         _AUTO_REFRESH_TASK = asyncio.create_task(_auto_refresh_loop(mins))
         log.info(f"Auto-refresh enabled: every {mins} minutes")
+    try:
+        prefix_cmds = sorted(c.name for c in bot.commands)
+        slash_cmds  = sorted(c.name for c in bot.tree.get_commands())
+        log.info(f"Registered prefix commands: {prefix_cmds}")
+        log.info(f"Registered slash commands:  {slash_cmds}")
+    except Exception:
+        pass
 
 if __name__ == "__main__":
     token = os.getenv("DISCORD_BOT_TOKEN") or os.getenv("DISCORD_TOKEN")
