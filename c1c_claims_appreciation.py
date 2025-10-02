@@ -246,16 +246,25 @@ async def _load_ext(name: str) -> bool:
 
 @bot.event
 async def setup_hook():
-    for ext in ("cogs.ops", "claims.middleware.coreops_prefix", "claims.middleware.help"):
+    async def _load(name: str) -> bool:
         try:
-            # Try async loader (newer d.py). If it's sync on 2.3.x, fall back.
             try:
-                await bot.load_extension(ext)   # raises TypeError on 2.3.x
+                await bot.load_extension(name)   # async extensions
             except TypeError:
-                bot.load_extension(ext)         # sync path for 2.3.x
-            log.info(f"[cogs] loaded {ext}")
+                bot.load_extension(name)         # legacy sync
+            log.info(f"[cogs] loaded {name}")
+            return True
         except Exception as e:
-            log.warning(f"[cogs] failed {ext}: {e}")
+            log.warning(f"[cogs] failed {name}: {e}")
+            return False
+
+    # Load the NEW help (not the old middleware one)
+    await _load("claims.help")
+
+    # CoreOps: prefer cogs/ops.py, fallback to claims/middleware/ops.py
+    loaded_ops = await _load("cogs.ops")
+    if not loaded_ops:
+        await _load("claims.middleware.ops")
 
 # ---------------- helpers ----------------
 def _is_image(att: discord.Attachment) -> bool:
