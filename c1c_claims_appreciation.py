@@ -11,6 +11,8 @@ import discord
 from discord.ext import commands
 from flask import Flask
 
+from core.prefix import get_prefix
+
 BOT_VERSION = "1.0.1"
 
 # ---------------- keep-alive (Render web service) ----------------
@@ -40,12 +42,63 @@ except Exception:
 log = logging.getLogger("c1c-claims")
 logging.basicConfig(level=logging.INFO)
 
+# ---------------- runtime telemetry ----------------
+START_TIME = datetime.datetime.utcnow()
+_LAST_EVENT_TS = START_TIME
+BOT_CONNECTED = False
+
+
+def _env_truthy(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)) or str(default))
+    except Exception:
+        return default
+
+
+STRICT_PROBE = _env_truthy("STRICT_PROBE", default=False)
+WATCHDOG_CHECK_SEC = _int_env("WATCHDOG_CHECK_SEC", 60)
+WATCHDOG_MAX_DISCONNECT_SEC = _int_env("WATCHDOG_MAX_DISCONNECT_SEC", 600)
+
+
+def _touch_event() -> None:
+    global _LAST_EVENT_TS
+    _LAST_EVENT_TS = datetime.datetime.utcnow()
+
+
+def _last_event_age_s() -> int:
+    try:
+        return max(0, int((datetime.datetime.utcnow() - _LAST_EVENT_TS).total_seconds()))
+    except Exception:
+        return 0
+
+
+def uptime_str() -> str:
+    delta = datetime.datetime.utcnow() - START_TIME
+    total = int(delta.total_seconds())
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, seconds = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    parts.append(f"{hours:02}h")
+    parts.append(f"{minutes:02}m")
+    parts.append(f"{seconds:02}s")
+    return " ".join(parts)
+
 # ---------------- discord client ----------------
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.guilds = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix=get_prefix, intents=intents)
 
 # disable default help so we can own !help behavior
 try:
@@ -1327,11 +1380,13 @@ async def on_command_error(ctx, error):
 # ---------------- message listeners ----------------
 @bot.event
 async def on_member_ban(guild, user):
+    _touch_event()
     # defensive: clear any pending group flush for banned users
     GROUP.get(guild.id, {}).pop(getattr(user, "id", None), None)
 
 @bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
+    _touch_event()
     """When a level role is added by any source, post the praise embed to #levels."""
     try:
         if not LEVELS:
@@ -1352,14 +1407,24 @@ async def on_member_update(before: discord.Member, after: discord.Member):
 
 @bot.event
 async def on_message(msg: discord.Message):
+    _touch_event()
     # Ignore ourselves and other bots for commands
     if msg.author.bot:
         return
 
     # --- run commands first, then exit if it looks like one ---
     try:
-        prefix = bot.command_prefix if isinstance(bot.command_prefix, str) else "!"
-        if (msg.content or "").startswith(prefix):
+        prefixes = await bot.get_prefix(msg)
+        if isinstance(prefixes, str):
+            prefixes = [prefixes]
+        else:
+            try:
+                prefixes = list(prefixes)
+            except TypeError:
+                prefixes = [str(prefixes)]
+
+        content = msg.content or ""
+        if any(content.startswith(p) for p in prefixes):
             await bot.process_commands(msg)
             return
     except Exception:
@@ -1437,7 +1502,34 @@ async def _auto_refresh_loop(minutes: int):
             log.exception("Auto-refresh failed")
 
 @bot.event
+async def on_connect():
+    global BOT_CONNECTED
+    BOT_CONNECTED = True
+    _touch_event()
+    log.info("[gateway] connected")
+
+
+@bot.event
+async def on_resumed():
+    global BOT_CONNECTED
+    BOT_CONNECTED = True
+    _touch_event()
+    log.info("[gateway] resumed session")
+
+
+@bot.event
+async def on_disconnect():
+    global BOT_CONNECTED
+    BOT_CONNECTED = False
+    _touch_event()
+    log.warning("[gateway] disconnected")
+
+
+@bot.event
 async def on_ready():
+    global BOT_CONNECTED
+    BOT_CONNECTED = True
+    _touch_event()
     log.info(f"Logged in as {bot.user} ({bot.user.id})")
     try:
         load_config()
