@@ -105,3 +105,11 @@ class CoreOpsPrefixCog(commands.Cog):
             # Let your global on_command_error print a friendly message,
             # but log for debugging.
             log.exception("Routed command failed: !%s %s (%r)", OUR_PREFIX, sub, e)
+
+class CoreOpsPrefixCog(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    # … router code already present …
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(CoreOpsPrefixCog(bot))
