@@ -11,6 +11,8 @@ import discord
 from discord.ext import commands
 from flask import Flask
 
+BOT_VERSION = "1.0.1"
+
 # ---------------- keep-alive (Render web service) ----------------
 app = Flask(__name__)
 
