@@ -1,5 +1,5 @@
 # c1c_claims_appreciation.py
-# C1C Appreciation + Claims Bot — v1.0.0
+# C1C Appreciation + Claims Bot — v1.0.1 (Phase 1)
 # Web Service (Flask keep-alive) + config loader + review flow
 
 import os, re, json, asyncio, logging, datetime, threading
@@ -37,17 +37,6 @@ except Exception:
 # ---------------- logging ----------------
 log = logging.getLogger("c1c-claims")
 logging.basicConfig(level=logging.INFO)
-
-async def audit(guild: discord.Guild, text: str):
-    """Post a short line to the audit-log channel, if configured."""
-    try:
-        ch_id = CFG.get("audit_log_channel_id") or 0
-        ch = guild.get_channel(ch_id) if ch_id else None
-        if ch:
-            await ch.send(text)
-    except Exception:
-        # breadcrumb failures should never crash flows
-        pass
 
 # ---------------- discord client ----------------
 intents = discord.Intents.default()
@@ -310,7 +299,6 @@ async def safe_send_embed(dest, embed: discord.Embed, *, ping_user: Optional[dis
     except Exception as e:
         return await dest.send(f"Couldn’t send embed: `{e}`")
 
-
 def _resolve_target_channel(ctx: commands.Context, where: Optional[str]):
     if not where:
         ch = ctx.guild.get_channel(CFG.get("levels_channel_id") or 0)
@@ -461,13 +449,13 @@ async def _flush_group(guild: discord.Guild, user_id: int):
         log.warning("[praise] levels_channel_id missing/unreachable; skipping.")
         await audit(guild, f"praise_failed: levels_channel_unavailable items={len(items)} user=<@{user_id}>")
         return
-    items = entry["items"]
     user = guild.get_member(user_id) or await guild.fetch_member(user_id)
     if len(items) == 1:
         r, ach = items[0]
         await safe_send_embed(levels_ch, build_achievement_embed(guild, user, r, ach), ping_user=user)
     else:
         await safe_send_embed(levels_ch, build_group_embed(guild, user, items), ping_user=user)
+    await audit(guild, f"praise_posted: items={len(items)} user=<@{user_id}>")
 
 def _buffer_item(guild: discord.Guild, user_id: int, role: discord.Role, ach: dict):
     g = GROUP.setdefault(guild.id, {})
@@ -475,6 +463,7 @@ def _buffer_item(guild: discord.Guild, user_id: int, role: discord.Role, ach: di
     if not e:
         e = g[user_id] = {"items": [], "task": None}
     e["items"].append((role, ach))
+    asyncio.create_task(audit(guild, f"praise_enqueued: +1 user=<@{user_id}> ach=`{ach.get('key','?')}`"))
 
     delay = max(0, int(CFG.get("group_window_seconds") or 0))  # set 0 in sheet for instant mode
     if e["task"]:
@@ -492,6 +481,18 @@ def _buffer_item(guild: discord.Guild, user_id: int, role: discord.Role, ach: di
 
     e["task"] = asyncio.create_task(_delay())
 
+# ---------------- audit helper ----------------
+async def audit(guild: discord.Guild, text: str):
+    """Post a short line to the audit-log channel, if configured, and log to console."""
+    try:
+        ch_id = CFG.get("audit_log_channel_id") or 0
+        ch = guild.get_channel(ch_id) if ch_id else None
+        if ch:
+            await ch.send(text)
+        else:
+            log.info("[AUDIT:%s] %s", guild.id, text)
+    except Exception as e:
+        log.warning("[audit] failed to send: %r | text=%s", e, text)
 
 # ---------------- GK Review views ----------------
 
@@ -535,12 +536,6 @@ class GKReview(discord.ui.View):
             return False
         return True
 
-    async def _only_claimant(self, itx: discord.Interaction) -> bool:
-        if itx.user.id != self.claimant_id:
-            await itx.response.send_message("Only the claimant can cancel this request.", ephemeral=True)
-            return False
-        return True
-
     def _disable_all(self):
         for c in self.children:
             c.disabled = True
@@ -549,15 +544,13 @@ class GKReview(discord.ui.View):
     async def approve(self, itx: discord.Interaction, _btn: discord.ui.Button):
         if not await self._only_gk(itx):
             return
-
-        # Stop double-click races early
-        self._disable_all()
+        self._disable_all()  # stop double-click races
+        await itx.response.defer(ephemeral=True)
 
         ach = ACHIEVEMENTS.get(self.ach_key) or {}
         role = _get_role_by_config(itx.guild, ach)
         member = itx.guild.get_member(self.claimant_id) or await itx.guild.fetch_member(self.claimant_id)
 
-        # Idempotent behavior: if already has, finalize card visually and close
         if role and member and role in member.roles:
             try:
                 emb = discord.Embed(
@@ -566,19 +559,16 @@ class GKReview(discord.ui.View):
                     color=discord.Color.yellow(),
                     timestamp=datetime.datetime.utcnow(),
                 )
-                await itx.response.edit_message(embed=emb, content=None, view=None)
-                if self.claim_id:
-                    CLAIM_STATE[self.claim_id] = "closed"
-            except Exception:
-                pass
+                await itx.message.edit(embed=emb, content=None, view=None)
+                CLAIM_STATE[self.claim_id] = "closed"
+            except Exception as e:
+                log.warning("[approve already-has] edit failed: %r", e)
             return
 
-        await itx.response.defer(ephemeral=True)
         ok = await finalize_grant(itx.guild, self.claimant_id, self.ach_key)
         try:
             if ok:
-                if self.claim_id:
-                    CLAIM_STATE[self.claim_id] = "closed"
+                CLAIM_STATE[self.claim_id] = "closed"
                 emb = discord.Embed(
                     title="Approved",
                     description=f"Granted {role.mention} to {member.mention}.",
@@ -599,8 +589,8 @@ class GKReview(discord.ui.View):
                 await itx.message.edit(embed=emb, content=None, view=None)
                 await audit(itx.guild, f"gk_approve_failed: role=`{self.ach_key}` user=<@{self.claimant_id}> by=<@{itx.user.id}>")
                 await itx.followup.send("Couldn’t grant. See audit-log for details.", ephemeral=True)
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("[approve] message edit failed: %r", e)
 
     @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger)
     async def deny(self, itx: discord.Interaction, _btn: discord.ui.Button):
@@ -631,12 +621,11 @@ class GKReview(discord.ui.View):
                     timestamp=datetime.datetime.utcnow(),
                 )
                 await itx.message.edit(embed=emb, content=None, view=TryAgainView(self.claimant_id, self.att, claim_id=self.claim_id))
-                if self.claim_id:
-                    CLAIM_STATE[self.claim_id] = "closed"
+                CLAIM_STATE[self.claim_id] = "closed"
                 await audit(sel_itx.guild, f"gk_denied: role=`{self.ach_key}` user=<@{self.claimant_id}> reason={code} by=<@{sel_itx.user.id}>")
                 await sel_itx.response.send_message(f"Denied with reason: {reason}", ephemeral=True)
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("[deny] edit failed: %r", e)
 
         sel.callback = _on_pick
         v.add_item(sel)
@@ -647,7 +636,6 @@ class GKReview(discord.ui.View):
         if not await self._only_gk(itx):
             return
 
-        # keep options in the same category as the originally requested achievement
         base = ACHIEVEMENTS.get(self.ach_key) or {}
         base_cat = base.get("category")
 
@@ -655,8 +643,6 @@ class GKReview(discord.ui.View):
             a for a in ACHIEVEMENTS.values()
             if a.get("category") == base_cat and a.get("key") != self.ach_key
         ]
-
-        # sort for sanity, trim to Discord's 25-option limit
         achs.sort(key=lambda a: (a.get("display_name") or a.get("key") or "").lower())
         if not achs:
             return await itx.response.send_message("No alternative roles in this category.", ephemeral=True)
@@ -666,7 +652,7 @@ class GKReview(discord.ui.View):
 
         opts = []
         for a in achs:
-            label = (a.get("display_name") or a.get("key") or "Unnamed")[:100]  # Discord cap
+            label = (a.get("display_name") or a.get("key") or "Unnamed")[:100]
             opts.append(discord.SelectOption(label=label, value=a["key"]))
 
         v = discord.ui.View(timeout=600)
@@ -677,59 +663,46 @@ class GKReview(discord.ui.View):
                 return
             key = (sel_itx.data.get("values") or [None])[0]
             if not key or key not in ACHIEVEMENTS:
-                return await sel_itx.response.send_message(
-                    "That selection isn’t available anymore. Try again.",
-                    ephemeral=True
-                )
-            await sel_itx.response.defer()
+                return await sel_itx.response.send_message("That selection isn’t available anymore. Try again.", ephemeral=True)
+            await sel_itx.response.defer(ephemeral=True)
             ok = await finalize_grant(sel_itx.guild, self.claimant_id, key)
             try:
                 if ok:
-                    # Update the public review message
-                    await itx.message.edit(content=None, embed=discord.Embed(
+                    await itx.message.edit(embed=discord.Embed(
                         title="Approved (different role)",
                         description=f"Granted **{ACHIEVEMENTS[key].get('display_name') or key}** to <@{self.claimant_id}>.",
                         color=discord.Color.green(),
                         timestamp=datetime.datetime.utcnow(),
-                    ), view=None)
-                    # Tidy up the ephemeral selector
+                    ), content=None, view=None)
                     await sel_itx.edit_original_response(content="✅ Granted.", view=None)
                     await audit(sel_itx.guild, f"gk_approved_other: role=`{key}` user=<@{self.claimant_id}> by=<@{sel_itx.user.id}>")
-                    if self.claim_id:
-                        CLAIM_STATE[self.claim_id] = "closed"
+                    CLAIM_STATE[self.claim_id] = "closed"
                 else:
-                    await itx.message.edit(
-                        content=(""),
-                        embed=discord.Embed(
-                            title="Approval failed",
-                            description=("I couldn’t assign the role. Check **Manage Roles** and make sure my **top role** "
-                                         "is above the target role, then try again."),
-                            color=discord.Color.red(),
-                            timestamp=datetime.datetime.utcnow(),
-                        ),
-                        view=None
-                    )
+                    await itx.message.edit(embed=discord.Embed(
+                        title="Approval failed",
+                        description=("I couldn’t assign the role. Check **Manage Roles** and make sure my **top role** "
+                                     "is above the target role, then try again."),
+                        color=discord.Color.red(),
+                        timestamp=datetime.datetime.utcnow(),
+                    ), content=None, view=None)
                     await sel_itx.edit_original_response(content="⚠️ Couldn’t grant the selected role.", view=None)
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("[grant_other] edit failed: %r", e)
 
         sel.callback = _on_pick
         v.add_item(sel)
         await itx.response.send_message("Choose replacement role:", view=v, ephemeral=True)
-
-
 
 # ---------------- Pickers with claim-state awareness ----------------
 class BaseView(discord.ui.View):
     def __init__(self, owner_id: int, claim_id: int, timeout=600, announce: bool = False):
         super().__init__(timeout=timeout)
         self.owner_id = owner_id
-        self.claim_id = claim_id     # id of the FIRST prompt message
-        self.announce = announce     # only the first prompt sets this True
+        self.claim_id = claim_id
+        self.announce = announce
         self.message: Optional[discord.Message] = None
 
     async def on_timeout(self):
-        # only first prompt may announce, and only if claim is still open
         if not self.announce:
             return
         if CLAIM_STATE.get(self.claim_id) != "open":
@@ -737,14 +710,11 @@ class BaseView(discord.ui.View):
         CLAIM_STATE[self.claim_id] = "expired"
         try:
             if self.message:
-                await self.message.channel.send(
-                    f"**Claim expired for <@{self.owner_id}>.** No action needed."
-                )
+                await self.message.channel.send(f"**Claim expired for <@{self.owner_id}>.** No action needed.")
         except Exception:
             pass
 
     async def interaction_check(self, itx: discord.Interaction) -> bool:
-        # reject interactions for closed/expired claims
         state = CLAIM_STATE.get(self.claim_id)
         if state and state != "open":
             try:
@@ -752,7 +722,6 @@ class BaseView(discord.ui.View):
             except Exception:
                 pass
             return False
-
         if itx.user.id != self.owner_id:
             await itx.response.send_message("This claim belongs to someone else. Please upload your own screenshot.", ephemeral=True)
             return False
@@ -925,18 +894,19 @@ async def finalize_grant(guild: discord.Guild, user_id: int, ach_key: str) -> bo
     ach = ACHIEVEMENTS.get(ach_key)
     if not ach:
         log.warning("[grant] unknown ach_key=%s", ach_key)
+        await audit(guild, f"grant_fail: unknown_ach key=`{ach_key}` user=<@{user_id}>")
         return False
 
     role = _get_role_by_config(guild, ach)
     if not role:
         log.warning("[grant] role not found for ach_key=%s (role_id=%s, display_name=%s)",
                     ach_key, ach.get("role_id"), ach.get("display_name"))
+        await audit(guild, f"grant_fail: role_not_found key=`{ach_key}` user=<@{user_id}>")
         return False
 
     member = guild.get_member(user_id) or await guild.fetch_member(user_id)
 
     me = guild.me
-    # correct hierarchy/permission check
     if (not me.guild_permissions.manage_roles) or (role.position >= me.top_role.position):
         log.error("[grant] cannot assign role '%s' (%d). Check Manage Roles + role hierarchy (bot top role above).",
                   role.name, role.id)
@@ -946,10 +916,12 @@ async def finalize_grant(guild: discord.Guild, user_id: int, ach_key: str) -> bo
                 f"⚠️ I can’t assign **{role.mention}** to {member.mention}. "
                 f"Please move my top role above **{role.name}** and ensure I have **Manage Roles**."
             )
+        await audit(guild, f"grant_fail: hierarchy_perm role=`{role.id}` user=<@{user_id}>")
         return False
 
     if role in member.roles:
         log.info("[grant] %s already has %s", member, role)
+        await audit(guild, f"grant_skip: already_has role=`{role.id}` user=<@{user_id}>")
         return False
 
     try:
@@ -962,6 +934,7 @@ async def finalize_grant(guild: discord.Guild, user_id: int, ach_key: str) -> bo
                 f"⚠️ Tried to assign {role.mention} to {member.mention} but got "
                 f"`{type(e).__name__}: {e}`. Check permissions/role hierarchy and try again."
             )
+        await audit(guild, f"grant_fail: exception role=`{role.id}` user=<@{user_id}> type={type(e).__name__}")
         return False
 
     if CFG.get("audit_log_channel_id"):
@@ -973,8 +946,12 @@ async def finalize_grant(guild: discord.Guild, user_id: int, ach_key: str) -> bo
                 color=discord.Color.green(),
                 timestamp=datetime.datetime.utcnow()
             )
-            await ch.send(embed=emb)
+            try:
+                await ch.send(embed=emb)
+            except Exception:
+                pass
 
+    await audit(guild, f"grant_ok: role=`{role.id}` key=`{ach_key}` user=<@{user_id}>")
     _buffer_item(guild, user_id, role, ach)
     return True
 
@@ -982,10 +959,6 @@ async def process_claim(itx: discord.Interaction, ach_key: str,
                         att: Optional[discord.Attachment],
                         batch_list: Optional[List[discord.Attachment]],
                         claim_id: int):
-    # progress → suppress any future expiry
-    if claim_id:
-        CLAIM_STATE[claim_id] = "closed"
-
     guild = itx.guild
     ach = ACHIEVEMENTS.get(ach_key)
     if not ach:
@@ -993,7 +966,6 @@ async def process_claim(itx: discord.Interaction, ach_key: str,
         await itx.followup.send("That selection isn’t in my config. Try again or ping a Guardian Knight.", ephemeral=True)
         return
 
-    # ensure role exists
     role = _get_role_by_config(guild, ach)
     if not role:
         log.warning("[claim] role not configured for ach_key=%s (role_id=%s, display_name=%s)",
@@ -1025,16 +997,17 @@ async def process_claim(itx: discord.Interaction, ach_key: str,
                     await itx.message.edit(content=f"ℹ️ Already had **{role.name}**.", view=None)
                 except Exception:
                     pass
+                CLAIM_STATE[claim_id] = "closed"
                 return
 
             ok = await finalize_grant(guild, itx.user.id, ach_key)
             if ok:
-                # lock the picker panel and show a clear confirmation on the original message
                 try:
                     await itx.message.edit(content=f"✅ **{role.name}** granted to {itx.user.mention}.", view=None)
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.warning("[auto_grant] edit failed: %r", e)
                 await itx.channel.send(f"✨ **{role.name}** unlocked for {itx.user.mention}!")
+                CLAIM_STATE[claim_id] = "closed"
             else:
                 try:
                     await itx.message.edit(content=f"⚠️ Couldn’t grant **{role.name}**. A GK/Admin needs to adjust permissions.", view=None)
@@ -1044,8 +1017,10 @@ async def process_claim(itx: discord.Interaction, ach_key: str,
                     f"⚠️ Couldn’t grant **{role.name}** to {itx.user.mention}. "
                     f"An admin may need to move my top role above that role or give me **Manage Roles**."
                 )
+                CLAIM_STATE[claim_id] = "closed"
             return
 
+        # REVIEW MODE (GK)
         rid = CFG.get("guardian_knights_role_id")
         ping = f"<@&{rid}>" if rid else "**Guardian Knights**"
         emb = discord.Embed(
@@ -1059,6 +1034,14 @@ async def process_claim(itx: discord.Interaction, ach_key: str,
             emb.set_thumbnail(url=thumb)
         v = GKReview(itx.user.id, ach_key, a, claim_id=claim_id)
         await itx.channel.send(content=f"{ping}, please review.", embed=emb, view=v)
+        await audit(guild, f"claim_routed_to_gk: key=`{ach_key}` user=<@{itx.user.id}>")
+
+        # Lock the user's selector and show a clear “sent for review” note
+        try:
+            await itx.message.edit(content="🛡 Sent for **Guardian Knight** review — hang tight. You’ll be pinged after a decision.", view=None)
+        except Exception as e:
+            log.warning("[route_to_gk] user panel edit failed: %r", e)
+        CLAIM_STATE[claim_id] = "closed"
 
     if batch_list:
         for a in batch_list:
@@ -1250,7 +1233,6 @@ async def help_cmd(ctx: commands.Context, *, topic: str = None):
     if not topic:
         return await ctx.reply(embed=_mk_help_embed_claims(ctx.guild), mention_author=False)
 
-    # subtopic blurbs
     pages = {
         "testconfig":     "`!testconfig`\nShow current configuration: targets, role ids, source & row counts.",
         "configstatus":   "`!configstatus`\nShort one-line status: source, loaded time, counts.",
@@ -1261,7 +1243,6 @@ async def help_cmd(ctx: commands.Context, *, topic: str = None):
         "testlevel":      "`!testlevel [query] [where]`\nPreview a level-up embed (optionally to another channel).",
         "flushpraise":    "`!flushpraise`\nForce-post any buffered praise in this server.",
         "ping":           "`!ping`\nSimple liveness check.",
-        # player-facing hints (aliases)
         "claim":          "Post your screenshot **in the configured claims thread**. I’ll guide you via buttons.",
         "claims":         "Same as `!help claim`.",
         "gk":             "Guardian Knights review claims that need verification. They can approve/deny or grant a different role.",
@@ -1269,14 +1250,12 @@ async def help_cmd(ctx: commands.Context, *, topic: str = None):
 
     txt = pages.get(topic)
     if not txt:
-        # behave like unknown command: no chat reply, log only
         logging.getLogger("c1c-claims").warning("Unknown help topic requested: %s", topic)
         return
 
     e = discord.Embed(title=f"!help {topic}", description=txt, color=HELP_COLOR)
     e.set_footer(text=CFG.get("embed_footer_text", "C1C Achievements") or "C1C Achievements")
     await ctx.reply(embed=e, mention_author=False)
-
 
 # ---------------- error reporter ----------------
 @bot.event
@@ -1290,6 +1269,11 @@ async def on_command_error(ctx, error):
 
 # ---------------- message listeners ----------------
 @bot.event
+async def on_member_ban(guild, user):
+    # defensive: clear any pending group flush for banned users
+    GROUP.get(guild.id, {}).pop(getattr(user, "id", None), None)
+
+@bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
     """When a level role is added by any source, post the praise embed to #levels."""
     try:
@@ -1300,14 +1284,12 @@ async def on_member_update(before: discord.Member, after: discord.Member):
             return
 
         before_ids = {r.id for r in before.roles}
-        # check any newly added role and see if it maps to a LEVELS row
         for role in after.roles:
             if role.id not in before_ids:
                 row = _match_levels_row_by_role(role)
                 if row:
                     emb = build_level_embed(after.guild, after, row)
                     await safe_send_embed(levels_ch, emb, ping_user=after)
-
     except Exception:
         log.exception("[levels] on_member_update failed")
 
@@ -1317,11 +1299,10 @@ async def on_message(msg: discord.Message):
     if bot.user and msg.author.id == bot.user.id:
         return
 
-    # Humans can invoke commands
     if not msg.author.bot:
         await bot.process_commands(msg)
 
-    # ----- Level-up trigger watcher (plaintext from another bot) -----
+    # Level-up trigger watcher (plaintext from another bot)
     try:
         m = re.search(r"has\s+reached\s+Level\s+(\d+)", msg.content or "", re.IGNORECASE)
         if m:
@@ -1330,7 +1311,6 @@ async def on_message(msg: discord.Message):
             key = f"lvl_{level_num}"
             row = next((r for r in LEVELS if (r.get("key","").lower() == key)), None)
             if not row:
-                # fallback: match by level_key/display_name normalization
                 def norm(s): return (s or "").strip().lower().replace(" ", "").replace("_", "")
                 for r in LEVELS:
                     if norm(r.get("level_key")) == norm(key) or norm(r.get("display_name")) == norm(f"Level {level_num}"):
