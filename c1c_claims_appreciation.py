@@ -38,6 +38,17 @@ except Exception:
 log = logging.getLogger("c1c-claims")
 logging.basicConfig(level=logging.INFO)
 
+async def audit(guild: discord.Guild, text: str):
+    """Post a short line to the audit-log channel, if configured."""
+    try:
+        ch_id = CFG.get("audit_log_channel_id") or 0
+        ch = guild.get_channel(ch_id) if ch_id else None
+        if ch:
+            await ch.send(text)
+    except Exception:
+        # breadcrumb failures should never crash flows
+        pass
+
 # ---------------- discord client ----------------
 intents = discord.Intents.default()
 intents.message_content = True
@@ -445,8 +456,10 @@ async def _flush_group(guild: discord.Guild, user_id: int):
     if not entry:
         return
     levels_ch = guild.get_channel(CFG.get("levels_channel_id") or 0) if CFG.get("levels_channel_id") else None
+    items = (entry or {}).get("items") or []
     if not levels_ch:
-        log.warning("[praise] levels_channel_id not configured or not found; skipping praise. cfg=%s", CFG.get("levels_channel_id"))
+        log.warning("[praise] levels_channel_id missing/unreachable; skipping.")
+        await audit(guild, f"praise_failed: levels_channel_unavailable items={len(items)} user=<@{user_id}>")
         return
     items = entry["items"]
     user = guild.get_member(user_id) or await guild.fetch_member(user_id)
@@ -490,6 +503,13 @@ class TryAgainView(discord.ui.View):
         self.claim_id = claim_id
 
     async def interaction_check(self, itx: discord.Interaction) -> bool:
+        state = CLAIM_STATE.get(self.claim_id)
+        if state and state != "open":
+            try:
+                await itx.response.send_message("This claim is already closed.", ephemeral=True)
+            except Exception:
+                pass
+            return False
         if itx.user.id != self.owner_id:
             await itx.response.send_message("This belongs to someone else. Upload your own screenshot to claim.", ephemeral=True)
             return False
@@ -501,7 +521,7 @@ class TryAgainView(discord.ui.View):
 
 class GKReview(discord.ui.View):
     def __init__(self, claimant_id: int, ach_key: str, att: Optional[discord.Attachment], claim_id: int):
-        super().__init__(timeout=1800)
+        super().__init__(timeout=None)  # persist until acted upon
         self.claimant_id = claimant_id
         self.ach_key = ach_key
         self.att = att
@@ -529,27 +549,56 @@ class GKReview(discord.ui.View):
     async def approve(self, itx: discord.Interaction, _btn: discord.ui.Button):
         if not await self._only_gk(itx):
             return
-            
+
+        # Stop double-click races early
+        self._disable_all()
+
         ach = ACHIEVEMENTS.get(self.ach_key) or {}
         role = _get_role_by_config(itx.guild, ach)
         member = itx.guild.get_member(self.claimant_id) or await itx.guild.fetch_member(self.claimant_id)
+
+        # Idempotent behavior: if already has, finalize card visually and close
         if role and member and role in member.roles:
             try:
-                 await itx.response.edit_message(content="**Already has this role.** No action needed.", view=None)
+                emb = discord.Embed(
+                    title="Already has this role",
+                    description=f"{member.mention} already has {role.mention}.",
+                    color=discord.Color.yellow(),
+                    timestamp=datetime.datetime.utcnow(),
+                )
+                await itx.response.edit_message(embed=emb, content=None, view=None)
+                if self.claim_id:
+                    CLAIM_STATE[self.claim_id] = "closed"
             except Exception:
                 pass
             return
-        await itx.response.defer()
+
+        await itx.response.defer(ephemeral=True)
         ok = await finalize_grant(itx.guild, self.claimant_id, self.ach_key)
         try:
             if ok:
-                await itx.message.edit(content="**Approved.**", view=None)
-            else:
-                await itx.message.edit(
-                    content=("**Approval attempted but the role couldn’t be assigned.**\n"
-                             "Please check my **Manage Roles** permission and ensure my **top role is above** the target role, then try again."),
-                    view=None
+                if self.claim_id:
+                    CLAIM_STATE[self.claim_id] = "closed"
+                emb = discord.Embed(
+                    title="Approved",
+                    description=f"Granted {role.mention} to {member.mention}.",
+                    color=discord.Color.green(),
+                    timestamp=datetime.datetime.utcnow(),
                 )
+                await itx.message.edit(embed=emb, content=None, view=None)
+                await audit(itx.guild, f"gk_approved: role=`{self.ach_key}` user=<@{self.claimant_id}> by=<@{itx.user.id}>")
+                await itx.followup.send("Granted.", ephemeral=True)
+            else:
+                emb = discord.Embed(
+                    title="Approval failed",
+                    description=("I couldn’t assign the role. Check **Manage Roles** and make sure my **top role** "
+                                 "is above the target role, then try again."),
+                    color=discord.Color.red(),
+                    timestamp=datetime.datetime.utcnow(),
+                )
+                await itx.message.edit(embed=emb, content=None, view=None)
+                await audit(itx.guild, f"gk_approve_failed: role=`{self.ach_key}` user=<@{self.claimant_id}> by=<@{itx.user.id}>")
+                await itx.followup.send("Couldn’t grant. See audit-log for details.", ephemeral=True)
         except Exception:
             pass
 
@@ -557,16 +606,41 @@ class GKReview(discord.ui.View):
     async def deny(self, itx: discord.Interaction, _btn: discord.ui.Button):
         if not await self._only_gk(itx):
             return
-        reason = REASONS.get("NEED_BANNER", "Proof unclear. Please include the full result banner.")
-        try:
-            await itx.response.edit_message(
-                content=f"**Not approved.** Reason: **{reason}**\nPost a clearer screenshot and hit **Try Again**.",
-                view=TryAgainView(self.claimant_id, self.att, claim_id=self.claim_id)
-            )
-            if self.claim_id:
-                CLAIM_STATE[self.claim_id] = "closed"  
-        except Exception:
-            pass
+
+        # Build reason selector (up to 25 options)
+        opts = []
+        for code, text in REASONS.items():
+            label = (text or code)[:100]
+            opts.append(discord.SelectOption(label=label, value=code))
+        if not opts:
+            opts = [discord.SelectOption(label="Proof unclear. Please include the full result banner.", value="NEED_BANNER")]
+
+        v = discord.ui.View(timeout=300)
+        sel = discord.ui.Select(placeholder="Pick a denial reason…", options=opts)
+
+        async def _on_pick(sel_itx: discord.Interaction):
+            if not await self._only_gk(sel_itx):
+                return
+            code = (sel_itx.data.get("values") or [None])[0]
+            reason = REASONS.get(code) or code or "No reason provided"
+            try:
+                emb = discord.Embed(
+                    title="Denied",
+                    description=f"Reason: **{reason}**\nPost a clearer screenshot and hit **Try Again**.",
+                    color=discord.Color.orange(),
+                    timestamp=datetime.datetime.utcnow(),
+                )
+                await itx.message.edit(embed=emb, content=None, view=TryAgainView(self.claimant_id, self.att, claim_id=self.claim_id))
+                if self.claim_id:
+                    CLAIM_STATE[self.claim_id] = "closed"
+                await audit(sel_itx.guild, f"gk_denied: role=`{self.ach_key}` user=<@{self.claimant_id}> reason={code} by=<@{sel_itx.user.id}>")
+                await sel_itx.response.send_message(f"Denied with reason: {reason}", ephemeral=True)
+            except Exception:
+                pass
+
+        sel.callback = _on_pick
+        v.add_item(sel)
+        await itx.response.send_message("Pick a reason for denial:", view=v, ephemeral=True)
 
     @discord.ui.button(label="Grant different role…", style=discord.ButtonStyle.secondary)
     async def grant_other(self, itx: discord.Interaction, _btn: discord.ui.Button):
@@ -612,13 +686,27 @@ class GKReview(discord.ui.View):
             try:
                 if ok:
                     # Update the public review message
-                    await itx.message.edit(content="**Approved with different role.**", view=None)
+                    await itx.message.edit(content=None, embed=discord.Embed(
+                        title="Approved (different role)",
+                        description=f"Granted **{ACHIEVEMENTS[key].get('display_name') or key}** to <@{self.claimant_id}>.",
+                        color=discord.Color.green(),
+                        timestamp=datetime.datetime.utcnow(),
+                    ), view=None)
                     # Tidy up the ephemeral selector
                     await sel_itx.edit_original_response(content="✅ Granted.", view=None)
+                    await audit(sel_itx.guild, f"gk_approved_other: role=`{key}` user=<@{self.claimant_id}> by=<@{sel_itx.user.id}>")
+                    if self.claim_id:
+                        CLAIM_STATE[self.claim_id] = "closed"
                 else:
                     await itx.message.edit(
-                        content=("**Attempted alternate grant, but the role couldn’t be assigned.**\n"
-                                 "Please check my **Manage Roles** permission and ensure my **top role is above** the target role, then try again."),
+                        content=(""),
+                        embed=discord.Embed(
+                            title="Approval failed",
+                            description=("I couldn’t assign the role. Check **Manage Roles** and make sure my **top role** "
+                                         "is above the target role, then try again."),
+                            color=discord.Color.red(),
+                            timestamp=datetime.datetime.utcnow(),
+                        ),
                         view=None
                     )
                     await sel_itx.edit_original_response(content="⚠️ Couldn’t grant the selected role.", view=None)
@@ -656,6 +744,15 @@ class BaseView(discord.ui.View):
             pass
 
     async def interaction_check(self, itx: discord.Interaction) -> bool:
+        # reject interactions for closed/expired claims
+        state = CLAIM_STATE.get(self.claim_id)
+        if state and state != "open":
+            try:
+                await itx.response.send_message("This claim is already closed.", ephemeral=True)
+            except Exception:
+                pass
+            return False
+
         if itx.user.id != self.owner_id:
             await itx.response.send_message("This claim belongs to someone else. Please upload your own screenshot.", ephemeral=True)
             return False
@@ -867,7 +964,6 @@ async def finalize_grant(guild: discord.Guild, user_id: int, ach_key: str) -> bo
             )
         return False
 
-
     if CFG.get("audit_log_channel_id"):
         ch = guild.get_channel(CFG["audit_log_channel_id"])
         if ch:
@@ -897,7 +993,7 @@ async def process_claim(itx: discord.Interaction, ach_key: str,
         await itx.followup.send("That selection isn’t in my config. Try again or ping a Guardian Knight.", ephemeral=True)
         return
 
-    # 🔧 THIS WAS MISSING — without it, `role` below crashes
+    # ensure role exists
     role = _get_role_by_config(guild, ach)
     if not role:
         log.warning("[claim] role not configured for ach_key=%s (role_id=%s, display_name=%s)",
@@ -925,12 +1021,25 @@ async def process_claim(itx: discord.Interaction, ach_key: str,
 
             if role in member_roles:
                 await itx.channel.send(f"ℹ️ {itx.user.mention} already has **{role.name}**.")
+                try:
+                    await itx.message.edit(content=f"ℹ️ Already had **{role.name}**.", view=None)
+                except Exception:
+                    pass
                 return
 
             ok = await finalize_grant(guild, itx.user.id, ach_key)
             if ok:
+                # lock the picker panel and show a clear confirmation on the original message
+                try:
+                    await itx.message.edit(content=f"✅ **{role.name}** granted to {itx.user.mention}.", view=None)
+                except Exception:
+                    pass
                 await itx.channel.send(f"✨ **{role.name}** unlocked for {itx.user.mention}!")
             else:
+                try:
+                    await itx.message.edit(content=f"⚠️ Couldn’t grant **{role.name}**. A GK/Admin needs to adjust permissions.", view=None)
+                except Exception:
+                    pass
                 await itx.channel.send(
                     f"⚠️ Couldn’t grant **{role.name}** to {itx.user.mention}. "
                     f"An admin may need to move my top role above that role or give me **Manage Roles**."
@@ -1077,6 +1186,17 @@ async def testlevel(ctx: commands.Context, *, args: str = ""):
     if target.id != ctx.channel.id:
         await ctx.reply(f"Preview sent to {target.mention}", mention_author=False)
 
+@bot.command(name="flushpraise")
+async def flushpraise(ctx: commands.Context):
+    if not _is_staff(ctx.author):
+        return await ctx.send("Staff only.")
+    g = GROUP.get(ctx.guild.id, {})
+    if not g:
+        return await ctx.send("Nothing to flush.")
+    for uid in list(g.keys()):
+        await _flush_group(ctx.guild, uid)
+    await ctx.send("Flushed pending praise for this server.")
+
 @bot.command(name="ping")
 async def ping(ctx: commands.Context):
     await ctx.send("🏓 Pong — Live and listening.")
@@ -1113,7 +1233,8 @@ def _mk_help_embed_claims(guild: discord.Guild | None = None) -> discord.Embed:
             "• `!listach [filter]` — list loaded achievements\n"
             "• `!findach <text>` — search achievements\n"
             "• `!testach <key> [where]` — preview an achievement embed\n"
-            "• `!testlevel [query] [where]` — preview a level embed\n"
+            "• `!testlevel [query] [where]` — preview a level-up embed (optionally to another channel)\n"
+            "• `!flushpraise` — force-post any buffered praise\n"
             "• `!ping` — bot alive check"
         ),
         inline=False
@@ -1138,6 +1259,7 @@ async def help_cmd(ctx: commands.Context, *, topic: str = None):
         "findach":        "`!findach <text>`\nSearch achievements by key/name/category/text.",
         "testach":        "`!testach <key> [where]`\nPreview a single achievement embed (optionally to another channel).",
         "testlevel":      "`!testlevel [query] [where]`\nPreview a level-up embed (optionally to another channel).",
+        "flushpraise":    "`!flushpraise`\nForce-post any buffered praise in this server.",
         "ping":           "`!ping`\nSimple liveness check.",
         # player-facing hints (aliases)
         "claim":          "Post your screenshot **in the configured claims thread**. I’ll guide you via buttons.",
@@ -1166,7 +1288,7 @@ async def on_command_error(ctx, error):
     except:
         pass
 
-# ---------------- message listener ----------------
+# ---------------- message listeners ----------------
 @bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
     """When a level role is added by any source, post the praise embed to #levels."""
@@ -1191,25 +1313,44 @@ async def on_member_update(before: discord.Member, after: discord.Member):
 
 @bot.event
 async def on_message(msg: discord.Message):
-    if msg.author.bot:
+    # Always ignore our own messages
+    if bot.user and msg.author.id == bot.user.id:
         return
-    await bot.process_commands(msg)
 
-    # Levels auto-response (optional)
+    # Humans can invoke commands
+    if not msg.author.bot:
+        await bot.process_commands(msg)
+
+    # ----- Level-up trigger watcher (plaintext from another bot) -----
     try:
-        for row in LEVELS:
-            trig = row.get("trigger_contains") or row.get("Title") or ""
-            if trig and trig.lower() in msg.content.lower():
-                user = msg.mentions[0] if msg.mentions else msg.author
-                ch = msg.guild.get_channel(CFG["levels_channel_id"]) if CFG["levels_channel_id"] else None
+        m = re.search(r"has\s+reached\s+Level\s+(\d+)", msg.content or "", re.IGNORECASE)
+        if m:
+            level_num = int(m.group(1))
+            user = msg.mentions[0] if msg.mentions else msg.author
+            key = f"lvl_{level_num}"
+            row = next((r for r in LEVELS if (r.get("key","").lower() == key)), None)
+            if not row:
+                # fallback: match by level_key/display_name normalization
+                def norm(s): return (s or "").strip().lower().replace(" ", "").replace("_", "")
+                for r in LEVELS:
+                    if norm(r.get("level_key")) == norm(key) or norm(r.get("display_name")) == norm(f"Level {level_num}"):
+                        row = r
+                        break
+
+            if row:
+                ch = msg.guild.get_channel(CFG.get("levels_channel_id") or 0) if CFG.get("levels_channel_id") else None
                 if ch:
                     emb = build_level_embed(msg.guild, user, row)
                     await safe_send_embed(ch, emb, ping_user=user)
-                break
+                    await audit(msg.guild, f"level_praise: matched {row.get('key','?')} for <@{user.id}> (src_msg={msg.id})")
+                else:
+                    await audit(msg.guild, f"level_praise_failed: no levels_channel for <@{user.id}> (src_msg={msg.id})")
     except Exception:
-        pass
+        log.exception("[levels] watcher failed")
 
-    # Claims only in configured thread
+    # Claims only in configured thread and only for human posts
+    if msg.author.bot:
+        return
     if not CFG.get("public_claim_thread_id") or msg.channel.id != CFG.get("public_claim_thread_id"):
         return
     images = [a for a in msg.attachments if _is_image(a)]
@@ -1224,6 +1365,7 @@ async def on_message(msg: discord.Message):
         view.message = m
         view.claim_id = m.id
         CLAIM_STATE[m.id] = "open"
+        await audit(msg.guild, f"claim_opened: user=<@{msg.author.id}> images=1 msg={msg.id}")
     else:
         view = MultiImageChoice(msg.author.id, images, claim_id=0, announce=True)
         m = await msg.reply(
@@ -1232,6 +1374,7 @@ async def on_message(msg: discord.Message):
         view.message = m
         view.claim_id = m.id
         CLAIM_STATE[m.id] = "open"
+        await audit(msg.guild, f"claim_opened: user=<@{msg.author.id}> images={len(images)} msg={msg.id}")
 
 # ---------------- startup ----------------
 async def _auto_refresh_loop(minutes: int):
