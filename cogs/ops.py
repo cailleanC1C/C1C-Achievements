@@ -266,3 +266,11 @@ class OpsCog(commands.Cog):
                 await app.safe_send_embed(ctx, done)
         except Exception as e:
             await ctx.send(f"Reboot failed: `{e}`")
+
+class OpsCog(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    # … your existing Ops commands already live in this file …
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(OpsCog(bot))
