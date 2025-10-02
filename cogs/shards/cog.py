@@ -93,7 +93,7 @@ class ShardsCog(commands.Cog):
     async def _cmd_shards_help(self, ctx: commands.Context):
         text = (
             "**Shard & Mercy — Quick Guide**\n"
-            "Post a shard screenshot or type `!shards set` to enter counts for 🟩 🟦 🟪 🟥 🟨.\n"
+            "Post a shard screenshot or type `!shards set` to enter counts for {EMJ_MYS} {EMJ_ANC} {EMJ_VOID} {EMJ_PRI} {EMJ_SAC}.\n"
             "During pull sessions use `!mercy addpulls` → pick shard → number of pulls.\n"
             "If you hit **Epic/Legendary/Mythical**, I’ll ask **how many pulls were left after the last one**.\n"
             "**Guaranteed**/**Extra Legendary** don’t reset mercy—tick the flag.\n"
