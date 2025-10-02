@@ -255,15 +255,15 @@ async def load_cogs():
 
 @bot.event
 async def setup_hook():
-    try:
-        await bot.load_extension("cogs.ops")  # CoreOps commands
-    except Exception as e:
-        log.warning("[cogs] failed cogs.ops: %r", e)
+    async def _load(name):
+        try:
+            await bot.load_extension(name)
+            log.info(f"[cogs] loaded {name}")
+        except Exception as e:
+            log.warning(f"[cogs] failed {name}: {e}")
 
-    try:
-        await bot.load_extension("claims.middleware.coreops_prefix")  # optional router (!sc)
-    except Exception as e:
-        log.warning("[cogs] failed claims.middleware.coreops_prefix: %r", e)
+    await _load("cogs.ops")
+    await _load("claims.middleware.coreops_prefix")  # optional router
 
 # ---------------- helpers ----------------
 def _is_image(att: discord.Attachment) -> bool:
