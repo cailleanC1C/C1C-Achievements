@@ -320,6 +320,9 @@ async def setup_hook():
     if not loaded_ops:
         await _load("claims.middleware.ops")
 
+    # 🔹 Add the Shards & Mercy module
+    await _load("cogs.shards")
+
 # ---------------- helpers ----------------
 def _is_image(att: discord.Attachment) -> bool:
     ct = (att.content_type or "").lower().split(";")[0].strip()
