@@ -732,20 +732,36 @@ class MultiImageChoice(BaseView):
         super().__init__(owner_id, claim_id, announce=announce)
         self.atts = [a for a in atts if _is_image(a)]
 
-    @discord.ui.button(label="Use first", style=discord.ButtonStyle.primary)
-    async def use_first(self, itx: discord.Interaction, _btn: discord.ui.Button):
-        await show_category_picker(itx, self.atts[0], claim_id=self.claim_id)
-
-    @discord.ui.button(label="Choose image", style=discord.ButtonStyle.secondary)
-    async def choose_image(self, itx: discord.Interaction, _btn: discord.ui.Button):
+    @discord.ui.button(label="Proceed with one role", style=discord.ButtonStyle.primary)
+    async def proceed_one(self, itx: discord.Interaction, _btn: discord.ui.Button):
+        # Let the user choose exactly one screenshot to continue with
         view = ImageSelect(self.owner_id, self.atts, self.claim_id)
-        await itx.response.edit_message(content="Pick one screenshot:", view=view)
+        await itx.response.edit_message(content="Pick a single screenshot to claim one role:", view=view)
         view.message = await itx.edit_original_response()
 
-    @discord.ui.button(label="Use all", style=discord.ButtonStyle.success)
-    async def use_all(self, itx: discord.Interaction, _btn: discord.ui.Button):
-        await itx.response.edit_message(content=f"Apply one achievement to all **{len(self.atts)}** screenshots from this post. Pick the achievement once.", view=None)
-        await show_category_picker(itx, None, batch_list=self.atts, claim_id=self.claim_id)
+    @discord.ui.button(label="I want multiple roles", style=discord.ButtonStyle.secondary)
+    async def want_multiple(self, itx: discord.Interaction, _btn: discord.ui.Button):
+        # Explain policy and close the claim so they can re-post
+        CLAIM_STATE[self.claim_id] = "closed"
+        self.stop()
+        try:
+            await itx.response.edit_message(
+                content=("For multiple roles, please upload **one screenshot per message** in this thread. "
+                         "This claim is closed so you can re-post them one by one."),
+                view=None
+            )
+        except discord.InteractionResponded:
+            await itx.followup.send(
+                "For multiple roles, upload **one screenshot per message** in this thread. "
+                "This claim is closed so you can re-post them one by one.",
+                ephemeral=True
+            )
+        try:
+            await itx.channel.send(
+                f"{itx.user.mention} wants multiple roles — please upload each screenshot as a separate post."
+            )
+        except Exception:
+            pass
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
     async def cancel(self, itx: discord.Interaction, _btn: discord.ui.Button):
@@ -1347,10 +1363,14 @@ async def on_message(msg: discord.Message):
         CLAIM_STATE[m.id] = "open"
         await audit(msg.guild, f"claim_opened: user=<@{msg.author.id}> images=1 msg={msg.id}")
     else:
+    else:
         view = MultiImageChoice(msg.author.id, images, claim_id=0, announce=True)
         m = await msg.reply(
-            f"**I found {len(images)} screenshots. What do you want to do?**",
-            view=view, mention_author=False)
+            f"**I found {len(images)} screenshots.**\n"
+            "Do you want multiple roles? If yes, upload **one screenshot per message** and claim each separately.\n"
+            "Otherwise, proceed to claim **one role** for a single screenshot.",
+            view=view, mention_author=False
+        )
         view.message = m
         view.claim_id = m.id
         CLAIM_STATE[m.id] = "open"
