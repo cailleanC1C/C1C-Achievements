@@ -226,6 +226,36 @@ def load_config():
     CONFIG_META["source"] = source
     CONFIG_META["loaded_at"] = datetime.datetime.utcnow()
 
+# ---------- COG LOADER ----------
+async def _load_ext(name: str) -> bool:
+    try:
+        # most modern cogs use async setup(bot)
+        await bot.load_extension(name)
+        log.info(f"[cogs] loaded {name}")
+        return True
+    except TypeError:
+        # fallback for legacy sync setup(bot)
+        bot.load_extension(name)
+        log.info(f"[cogs] loaded (sync) {name}")
+        return True
+    except Exception as e:
+        log.warning(f"[cogs] failed {name}: {e}")
+        return False
+
+async def load_cogs():
+    # Help (you have: claims/middleware/help.py)
+    await _load_ext("claims.middleware.help")
+
+    # CoreOps — prefer cogs/ops.py, fall back to claims/middleware/ops.py if needed
+    loaded = await _load_ext("cogs.ops")
+    if not loaded:
+        await _load_ext("claims.middleware.ops")
+
+@bot.event
+async def setup_hook():
+    # runs before on_ready; perfect place to load extensions
+    await load_cogs()
+
 # ---------------- helpers ----------------
 def _is_image(att: discord.Attachment) -> bool:
     ct = (att.content_type or "").lower().split(";")[0].strip()
@@ -1240,38 +1270,6 @@ def _mk_help_embed_claims(guild: discord.Guild | None = None) -> discord.Embed:
     )
     e.set_footer(text=CFG.get("embed_footer_text", "C1C Achievements") or "C1C Achievements")
     return e
-
-@bot.command(name="help")
-async def help_cmd(ctx: commands.Context, *, topic: str = None):
-    topic = (topic or "").strip().lower()
-
-    # show overview if no topic given
-    if not topic:
-        return await ctx.reply(embed=_mk_help_embed_claims(ctx.guild), mention_author=False)
-
-    pages = {
-        "testconfig":     "`!testconfig`\nShow current configuration: targets, role ids, source & row counts.",
-        "configstatus":   "`!configstatus`\nShort one-line status: source, loaded time, counts.",
-        "reloadconfig":   "`!reloadconfig`\nReload configuration from Google Sheets or Excel.",
-        "listach":        "`!listach [filter]`\nList loaded achievement keys (optionally filtered).",
-        "findach":        "`!findach <text>`\nSearch achievements by key/name/category/text.",
-        "testach":        "`!testach <key> [where]`\nPreview a single achievement embed (optionally to another channel).",
-        "testlevel":      "`!testlevel [query] [where]`\nPreview a level-up embed (optionally to another channel).",
-        "flushpraise":    "`!flushpraise`\nForce-post any buffered praise in this server.",
-        "ping":           "`!ping`\nSimple liveness check.",
-        "claim":          "Post your screenshot **in the configured claims thread**. I’ll guide you via buttons.",
-        "claims":         "Same as `!help claim`.",
-        "gk":             "Guardian Knights review claims that need verification. They can approve/deny or grant a different role.",
-    }
-
-    txt = pages.get(topic)
-    if not txt:
-        logging.getLogger("c1c-claims").warning("Unknown help topic requested: %s", topic)
-        return
-
-    e = discord.Embed(title=f"!help {topic}", description=txt, color=HELP_COLOR)
-    e.set_footer(text=CFG.get("embed_footer_text", "C1C Achievements") or "C1C Achievements")
-    await ctx.reply(embed=e, mention_author=False)
 
 # ---------------- error reporter ----------------
 @bot.event
