@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1] – 2025-10-02
+
+### Fixes
+
+* Restored runtime telemetry surfaces (uptime, last-event age, watchdog config) so `!health`, `!digest`, and `!env` return complete diagnostics again.
+* Updated prefix resolution to prioritize scoped prefixes (`!sc`, `!rem`, `!wc`, `!mm`) ahead of the global fallback, ensuring staff-prefixed CoreOps commands execute correctly.
+
 ## [1.0.0] – 2025-10-01
 
 ### Infrastructure
