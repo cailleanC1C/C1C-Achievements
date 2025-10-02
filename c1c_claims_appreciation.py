@@ -1318,14 +1318,26 @@ async def on_member_update(before: discord.Member, after: discord.Member):
 
 @bot.event
 async def on_message(msg: discord.Message):
-    # Always ignore our own messages
-    if bot.user and msg.author.id == bot.user.id:
+    # Ignore ourselves and other bots for commands
+    if msg.author.bot:
         return
 
-    if not msg.author.bot:
+    # --- run commands first, then exit if it looks like one ---
+    try:
+        prefix = bot.command_prefix if isinstance(bot.command_prefix, str) else "!"
+        if (msg.content or "").startswith(prefix):
+            await bot.process_commands(msg)
+            return
+    except Exception:
+        # fall back to processing anyway
         await bot.process_commands(msg)
+        return
+    # ----------------------------------------------------------
 
-    # Level-up trigger watcher (plaintext from another bot)
+    # (Optional) still let non-command messages reach command parser (aliases etc.)
+    await bot.process_commands(msg)
+
+    # Level-up trigger watcher (leave as-is)
     try:
         m = re.search(r"has\s+reached\s+Level\s+(\d+)", msg.content or "", re.IGNORECASE)
         if m:
@@ -1351,9 +1363,7 @@ async def on_message(msg: discord.Message):
     except Exception:
         log.exception("[levels] watcher failed")
 
-    # Claims only in configured thread and only for human posts
-    if msg.author.bot:
-        return
+    # Claims thread gating
     if not CFG.get("public_claim_thread_id") or msg.channel.id != CFG.get("public_claim_thread_id"):
         return
     images = [a for a in msg.attachments if _is_image(a)]
