@@ -125,4 +125,8 @@ class AddPullsRarities(discord.ui.Modal):
         elif self.shard == ShardType.PRIMAL:
             out["legendary"] = self._yn(self.leg.value)
             out["legendary_left"] = self._num(self.leg_left.value, N)
-            out["my]()
+            out["mythical"] = self._yn(self.myth.value)
+            out["mythical_left"] = self._num(self.myth_left.value, N)
+            g,e = self._flags(self.flags.value)
+            out["guaranteed"], out["extra"] = g, e
+        return out
