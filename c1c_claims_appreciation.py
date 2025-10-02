@@ -1363,7 +1363,6 @@ async def on_message(msg: discord.Message):
         CLAIM_STATE[m.id] = "open"
         await audit(msg.guild, f"claim_opened: user=<@{msg.author.id}> images=1 msg={msg.id}")
     else:
-    else:
         view = MultiImageChoice(msg.author.id, images, claim_id=0, announce=True)
         m = await msg.reply(
             f"**I found {len(images)} screenshots.**\n"
