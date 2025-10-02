@@ -274,3 +274,17 @@ class OpsCog(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(OpsCog(bot))
+
+from discord.ext import commands
+
+class CoreOps(commands.Cog):
+    def __init__(self, bot): self.bot = bot
+
+    @commands.command(name="health")
+    @commands.has_permissions(manage_guild=True)
+    async def health(self, ctx: commands.Context):
+        await ctx.send("CoreOps: healthy ✅")
+
+# required by discord.py extension loader
+async def setup(bot):
+    await bot.add_cog(CoreOps(bot))
