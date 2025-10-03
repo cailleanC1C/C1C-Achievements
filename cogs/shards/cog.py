@@ -9,6 +9,8 @@ from .constants import ShardType, Rarity, DISPLAY_ORDER
 from . import sheets_adapter as SA
 from .views import SetCountsModal, AddPullsStart, AddPullsCount, AddPullsRarities
 from .renderer import build_summary_embed
+import io
+from .ocr import extract_counts_from_image_bytes
 
 UTC = timezone.utc
 
@@ -38,6 +40,11 @@ class ShardsCog(commands.Cog):
             if cc.thread_id == thread_id and cc.is_enabled:
                 return ct
         return None
+    
+    # --- OCR helper (reads the attachment and returns {ShardType:int}) ---
+    async def _ocr_prefill_from_attachment(self, att: discord.Attachment) -> Dict[ShardType, int]:
+        data = await att.read()
+        return extract_counts_from_image_bytes(data) or {}
 
     # ---------- WATCHER: images in shard threads ----------
     @commands.Cog.listener()
@@ -53,25 +60,27 @@ class ShardsCog(commands.Cog):
 
         view = discord.ui.View(timeout=120)
         btn = discord.ui.Button(label="Review Shards", style=discord.ButtonStyle.primary)
-
+        
+        # Build the images list for OCR
+        images = [a for a in message.attachments if (a.content_type or "").startswith("image/")]
+        
+        async def _submit_counts(modal_inter: discord.Interaction, counts: Dict[ShardType, int]):
+            if not any(counts.values()):
+                await modal_inter.response.send_message("No numbers provided.", ephemeral=True)
+                return
+            clan_tag = self._clan_tag_for_thread(message.channel.id) or ""
+            SA.append_snapshot(message.author.id, message.author.display_name, clan_tag, counts, "manual", message.jump_url)
+            await self._refresh_summary_for_clan(clan_tag)
+            await modal_inter.response.send_message("Counts saved. Summary updated.", ephemeral=True)
+        
         async def _open_modal(inter: discord.Interaction):
             if inter.user.id != message.author.id and not _has_any_role(inter.user, self.cfg.roles_staff_override):
                 await inter.response.send_message("Only the image author or staff can review this.", ephemeral=True)
                 return
-            modal = SetCountsModal(prefill=None)  # TODO: OCR prefill
+            prefill = await self._ocr_prefill_from_attachment(images[0])
+            modal = SetCountsModal(prefill=prefill, on_submit_cb=_submit_counts)
             await inter.response.send_modal(modal)
-            timed_out = await modal.wait()
-            if timed_out:
-                return
-            counts = modal.parse_counts()
-            if not any(counts.values()):
-                await inter.followup.send("No numbers provided.", ephemeral=True)
-                return
-            target = message.author
-            SA.append_snapshot(target.id, target.display_name, self._clan_tag_for_thread(message.channel.id) or "", counts, "manual", message.jump_url)
-            await self._refresh_summary_for_clan(self._clan_tag_for_thread(message.channel.id))
-            await inter.followup.send("Counts saved. Summary updated.", ephemeral=True)
-
+        
         btn.callback = _open_modal
         view.add_item(btn)
         await message.channel.send("Spotted a shard screen. Want me to read it?", view=view)
@@ -116,17 +125,17 @@ class ShardsCog(commands.Cog):
         async def _open(inter: discord.Interaction):
             if inter.user.id != ctx.author.id:
                 await inter.response.send_message("This button is not for you.", ephemeral=True); return
-            modal = SetCountsModal(prefill=None)
+        
+            async def _submit_counts(modal_inter: discord.Interaction, counts: Dict[ShardType, int]):
+                if not any(counts.values()):
+                    await modal_inter.response.send_message("No numbers provided.", ephemeral=True); return
+                clan_tag = self._clan_tag_for_thread(ctx.channel.id) or (self._clan_for_member(target) or "")
+                SA.append_snapshot(target.id, target.display_name, clan_tag, counts, "manual", ctx.message.jump_url)
+                await self._refresh_summary_for_clan(clan_tag)
+                await modal_inter.response.send_message("Counts saved. Summary updated.", ephemeral=True)
+        
+            modal = SetCountsModal(prefill=None, on_submit_cb=_submit_counts)
             await inter.response.send_modal(modal)
-            timed_out = await modal.wait()
-            if timed_out: return
-            counts = modal.parse_counts()
-            if not any(counts.values()):
-                await inter.followup.send("No numbers provided.", ephemeral=True); return
-            clan_tag = self._clan_tag_for_thread(ctx.channel.id) or (self._clan_for_member(target) or "")
-            SA.append_snapshot(target.id, target.display_name, clan_tag, counts, "manual", ctx.message.jump_url)
-            await self._refresh_summary_for_clan(clan_tag)
-            await inter.followup.send("Counts saved. Summary updated.", ephemeral=True)
 
         btn.callback = _open
         view.add_item(btn)
