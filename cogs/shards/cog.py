@@ -90,9 +90,33 @@ class ShardsCog(commands.Cog):
             if inter.user.id != message.author.id and not _has_any_role(inter.user, self.cfg.roles_staff_override):
                 await inter.response.send_message("Only the image author or staff can review this.", ephemeral=True)
                 return
+            clan_tag = self._clan_tag_for_thread(message.channel.id) or ""
+
             # use whatever OCR finished; if not ready, modal still opens instantly
-            prefill = self._ocr_cache.get(message.id, {})  # ← CHANGED
-            modal = SetCountsModal(prefill=prefill)
+            prefill = dict(self._ocr_cache.get(message.id, {}) or {})
+
+            def _fetch_last_snapshot() -> Optional[Dict[ShardType, int]]:
+                snap = SA.get_last_inventory(message.author.id, clan_tag if clan_tag else None)
+                if not snap and clan_tag:
+                    snap = SA.get_last_inventory(message.author.id)
+                return snap
+
+            fallback_counts: Optional[Dict[ShardType, int]] = None
+            if not prefill or not any(prefill.values()):
+                fallback_counts = _fetch_last_snapshot()
+
+            if fallback_counts:
+                if not prefill:
+                    prefill = dict(fallback_counts)
+                else:
+                    for st, val in fallback_counts.items():
+                        if prefill.get(st, 0) <= 0 and val:
+                            prefill[st] = val
+
+            if prefill:
+                prefill = {st: prefill.get(st, 0) for st in ShardType}
+
+            modal = SetCountsModal(prefill=prefill or None)
             await inter.response.send_modal(modal)
             # wait for the user to submit the modal, then parse and save
             timed_out = await modal.wait()
@@ -102,8 +126,7 @@ class ShardsCog(commands.Cog):
             if not any(counts.values()):
                 await inter.followup.send("No numbers provided.", ephemeral=True)
                 return
-            
-            clan_tag = self._clan_tag_for_thread(message.channel.id) or ""
+
             SA.append_snapshot(message.author.id, message.author.display_name, clan_tag, counts, "manual", message.jump_url)
             await self._refresh_summary_for_clan(clan_tag)
             await inter.followup.send("Counts saved. Summary updated.", ephemeral=True)

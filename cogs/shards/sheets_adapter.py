@@ -260,20 +260,22 @@ def upsert_state(discord_id: int, clan_tag: str, *,
         ws.append_row(payload, value_input_option="RAW")
 
 # Optional helper for prefill UIs (safe to leave unused)
-def get_last_inventory(discord_id: int) -> Optional[Dict[ShardType, int]]:
+def get_last_inventory(discord_id: int, clan_tag: Optional[str] = None) -> Optional[Dict[ShardType, int]]:
     try:
         ws = _ws_required("SHARD_SNAPSHOTS")
         rows = ws.get_all_records()
         rows = [r for r in rows if str(r.get("discord_id")) == str(discord_id)]
+        if clan_tag:
+            rows = [r for r in rows if str(r.get("clan_tag")) == str(clan_tag)]
         if not rows:
             return None
         r = rows[-1]
         return {
-            ShardType.MYSTERY: int(r.get("mystery", 0)),
-            ShardType.ANCIENT: int(r.get("ancient", 0)),
-            ShardType.VOID:    int(r.get("void", 0)),
-            ShardType.SACRED:  int(r.get("sacred", 0)),
-            ShardType.PRIMAL:  int(r.get("primal", 0)),
+            ShardType.MYSTERY: _toi(r.get("mystery", 0)),
+            ShardType.ANCIENT: _toi(r.get("ancient", 0)),
+            ShardType.VOID:    _toi(r.get("void", 0)),
+            ShardType.SACRED:  _toi(r.get("sacred", 0)),
+            ShardType.PRIMAL:  _toi(r.get("primal", 0)),
         }
     except Exception:
         return None
