@@ -23,6 +23,7 @@ class ShardsCog(commands.Cog):
         self.bot = bot
         self.cfg, self.clans = SA.load_config()  # wire to Sheets
         self._live_views: Dict[int, discord.ui.View] = {}  # keep views referenced until timeout
+        self._ocr_cache: Dict[int, Dict[ShardType, int]] = {}  # cache OCR per source message id  ← ADDED
 
     # ---------- GUARDS ----------
     def _clan_for_member(self, member: discord.Member) -> Optional[str]:
@@ -46,6 +47,17 @@ class ShardsCog(commands.Cog):
     async def _ocr_prefill_from_attachment(self, att: discord.Attachment) -> Dict[ShardType, int]:
         data = await att.read()
         return extract_counts_from_image_bytes(data) or {}
+    
+    # --- Background: prime OCR cache so button clicks are instant ---
+    async def _cache_ocr_for_message(self, msg_id: int, att: discord.Attachment) -> None:
+        try:
+            data = await att.read()
+            pre = await asyncio.to_thread(extract_counts_from_image_bytes, data)  # CPU/subprocess off-thread
+            if pre:
+                self._ocr_cache[msg_id] = pre
+        except Exception:
+            # ignore OCR failures; modal will just open blank
+            pass
 
     # ---------- WATCHER: images in shard threads ----------
     @commands.Cog.listener()
@@ -78,10 +90,10 @@ class ShardsCog(commands.Cog):
             if inter.user.id != message.author.id and not _has_any_role(inter.user, self.cfg.roles_staff_override):
                 await inter.response.send_message("Only the image author or staff can review this.", ephemeral=True)
                 return
-            prefill = await self._ocr_prefill_from_attachment(images[0])
-            modal = SetCountsModal(prefill=prefill)  # no on_submit_cb
+            # use whatever OCR finished; if not ready, modal still opens instantly
+            prefill = self._ocr_cache.get(message.id, {})  # ← CHANGED
+            modal = SetCountsModal(prefill=prefill)
             await inter.response.send_modal(modal)
-            
             # wait for the user to submit the modal, then parse and save
             timed_out = await modal.wait()
             if timed_out:
@@ -101,13 +113,17 @@ class ShardsCog(commands.Cog):
         msg = await message.channel.send("Spotted a shard screen. Want me to read it?", view=view)
         self._live_views[msg.id] = view
         
-        # tidy up the ref after timeout
+        # prime OCR in the background (don’t block the button interaction)
+        asyncio.create_task(self._cache_ocr_for_message(message.id, images[0]))  # ← ADDED
+        
+        # tidy up refs after timeout
         async def _drop():
             try:
                 await asyncio.sleep((view.timeout or 120) + 5)
             except Exception:
                 pass
             self._live_views.pop(msg.id, None)
+            self._ocr_cache.pop(message.id, None)  # ← ADDED
         
         asyncio.create_task(_drop())
 
