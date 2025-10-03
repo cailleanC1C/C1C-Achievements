@@ -52,12 +52,9 @@ def _scale_if_small(w: int, h: int) -> float:
 
 
 def extract_counts_from_image_bytes(data: bytes) -> Dict[ShardType, int]:
-    """OCR shard counts from a screenshot.
-
-    Returns {ShardType: int} by reading the shard list rail. The OCR work happens
-    in two passes:
-      • Pass A (labels): full image, psm 6 — find 'Mystery/Ancient/Void/Primal/Sacred'
-      • Pass B (numbers): left-rail ROI, grayscale+threshold, digit whitelist — find counts
+    """
+    Read the five shard counts directly from the left rail (top→bottom), no labels.
+    Works for portrait & landscape. Returns {ShardType: int}.
     """
     try:
         import pytesseract
@@ -67,161 +64,96 @@ def extract_counts_from_image_bytes(data: bytes) -> Dict[ShardType, int]:
         return {}
 
     try:
-        # --- load & normalize orientation ---
+        # 1) load & normalize
         base = Image.open(io.BytesIO(data))
         base = ImageOps.exif_transpose(base)
-
-        # --- scale up small images (phones) for OCR clarity ---
         scale = _scale_if_small(base.width, base.height)
         if scale != 1.0:
             base = base.resize((int(base.width * scale), int(base.height * scale)))
 
         W, H = base.width, base.height
 
-        # -------------------------
-        # PASS A: LABELS (words)
-        # -------------------------
-        lab_img = ImageOps.autocontrast(base)
-        lab_cfg = "--oem 3 --psm 6"
-        lab = pytesseract.image_to_data(lab_img, output_type=Output.DICT, config=lab_cfg)
+        # helper: OCR numbers from a crop
+        def _ocr_numbers(crop_box):
+            roi = base.crop(crop_box)
+            cW, cH = roi.width, roi.height
+            img = ImageOps.grayscale(roi)
+            img = ImageOps.autocontrast(img)
+            img = img.filter(ImageFilter.UnsharpMask(radius=1.0, percent=120, threshold=3))
+            img = img.point(lambda p: 255 if p > 160 else 0)
+            cfg = ("--oem 3 --psm 6 "
+                   "-c tessedit_char_whitelist=0123456789., "
+                   "-c preserve_interword_spaces=1 "
+                   "-c classify_bln_numeric_mode=1")
+            dd = pytesseract.image_to_data(img, output_type=Output.DICT, config=cfg)
 
-        words = []
-        for i in range(len(lab["text"])):
-            t = (lab["text"][i] or "").strip()
-            if not t:
-                continue
-            try:
-                conf = float(lab["conf"][i])
-            except Exception:
-                conf = -1.0
-            if conf < 35:
-                continue
-            x = int(lab["left"][i])
-            y = int(lab["top"][i])
-            w = int(lab["width"][i])
-            h = int(lab["height"][i])
-            words.append({
-                "t": t,
-                "x": x,
-                "y": y,
-                "w": w,
-                "h": h,
-                "cx": x + w / 2,
-                "cy": y + h / 2,
-                "conf": conf,
-            })
+            toks = []
+            for i in range(len(dd["text"])):
+                raw = (dd["text"][i] or "").strip()
+                if not raw:
+                    continue
+                t = _normalize_digits(raw).replace("\u00A0", " ")
+                if not (_NUM_RE.match(t) or t.isdigit()):
+                    continue
+                try:
+                    conf = float(dd["conf"][i])
+                except Exception:
+                    conf = -1.0
+                if conf < 30:
+                    continue
+                x = int(dd["left"][i]); y = int(dd["top"][i])
+                w = int(dd["width"][i]); h = int(dd["height"][i])
+                # drop outliers (buttons/headers/noise)
+                if h < cH * 0.025 or h > cH * 0.18:
+                    continue
+                toks.append({"t": t, "x": x, "y": y, "w": w, "h": h,
+                             "cx": x + w / 2, "cy": y + h / 2, "conf": conf})
+            return toks, cH
 
-        if not words:
+        # helper: cluster tokens into rows, pick best per row
+        def _cluster_rows(tokens, crop_h):
+            if not tokens:
+                return []
+            tokens = sorted(tokens, key=lambda r: r["cy"])
+            rows, cur = [], []
+            tol = max(10, crop_h * 0.07)
+            lasty = None
+            for tk in tokens:
+                if lasty is None or abs(tk["cy"] - lasty) <= tol:
+                    cur.append(tk)
+                    lasty = tk["cy"] if lasty is None else (lasty * 0.6 + tk["cy"] * 0.4)
+                else:
+                    rows.append(cur); cur = [tk]; lasty = tk["cy"]
+            if cur:
+                rows.append(cur)
+            # pick best: conf desc, height desc, leftmost
+            return [sorted(r, key=lambda z: (-z["conf"], -z["h"], z["cx"]))[0] for r in rows]
+
+        # 2) try three left-rail crops
+        crops = [(0, 0, int(W * frac), H) for frac in (0.35, 0.42, 0.50)]
+        best_rows = []
+        for box in crops:
+            toks, cH = _ocr_numbers(box)
+            rows = _cluster_rows(toks, cH)
+            if len(rows) >= 5:
+                best_rows = rows
+                break
+
+        # last-chance: wider left mask
+        if len(best_rows) < 5:
+            toks, cH = _ocr_numbers((0, 0, int(W * 0.60), H))
+            best_rows = _cluster_rows(toks, cH)
+
+        if len(best_rows) < 5:
             return {}
 
-        cand_labels = []
-        for w in words:
-            key = _label_key(w["t"])
-            if not key:
-                continue
-            cand_labels.append({**w, "label": key})
-
-        if not cand_labels:
-            return {}
-
-        labels_by_type: Dict[ShardType, Dict[str, object]] = {}
-        for lab in cand_labels:
-            st = _LABEL_TO_ST[lab["label"]]
-            prev = labels_by_type.get(st)
-            if not prev or lab["conf"] > prev["conf"]:
-                labels_by_type[st] = lab
-
-        labels = list(labels_by_type.values())
-        if not labels:
-            return {}
-
-        # -------------------------
-        # PASS B: NUMBERS (left rail ROI)
-        # -------------------------
-        max_label_edge = max(lab["x"] + lab["w"] for lab in labels)
-        roi_x2 = min(W, int(max(W * 0.6, max_label_edge + W * 0.2)))
-        roi = base.crop((0, 0, roi_x2, H))
-
-        num_img = ImageOps.grayscale(roi)
-        num_img = ImageOps.autocontrast(num_img)
-        num_img = num_img.filter(ImageFilter.UnsharpMask(radius=1.0, percent=120, threshold=3))
-        num_img = num_img.point(lambda p: 255 if p > 160 else 0)
-
-        num_cfg = (
-            "--oem 3 --psm 6 "
-            "-c tessedit_char_whitelist=0123456789., "
-            "-c preserve_interword_spaces=1 "
-            "-c classify_bln_numeric_mode=1"
-        )
-        nd = pytesseract.image_to_data(num_img, output_type=Output.DICT, config=num_cfg)
-
-        nums = []
-        for i in range(len(nd["text"])):
-            raw = (nd["text"][i] or "").strip()
-            if not raw:
-                continue
-            t = _normalize_digits(raw)
-            t_for_match = t.replace("\u00A0", " ")  # non-breaking space
-            if not (_NUM_RE.match(t_for_match) or t_for_match.isdigit()):
-                continue
-            try:
-                conf = float(nd["conf"][i])
-            except Exception:
-                conf = -1.0
-            if conf < 30:
-                continue
-            x = int(nd["left"][i])
-            y = int(nd["top"][i])
-            w = int(nd["width"][i])
-            h = int(nd["height"][i])
-            nums.append({
-                "t": t,
-                "x": x,
-                "y": y,
-                "w": w,
-                "h": h,
-                "cx": x + w / 2,
-                "cy": y + h / 2,
-                "conf": conf,
-            })
-
-        if not nums:
-            return {}
-
-        # -------------------------
-        # MATCH labels to numbers (allow left OR right of label)
-        # -------------------------
-        results: Dict[ShardType, int] = {}
-        for lab in labels:
-            st = _LABEL_TO_ST[lab["label"]]
-            band_top = lab["cy"] - max(22, lab["h"] * 1.2)
-            band_bot = lab["cy"] + max(22, lab["h"] * 1.2)
-
-            cands = [n for n in nums if band_top <= n["cy"] <= band_bot]
-            if not cands:
-                cands = [n for n in nums if abs(n["cy"] - lab["cy"]) <= max(32, lab["h"] * 1.6)]
-            if not cands:
-                continue
-
-            anchor_x = lab["x"] + (lab["w"] / 2)
-            max_dx = max(lab["w"] * 6, W * 0.28)
-            cands = [n for n in cands if abs(n["cx"] - anchor_x) <= max_dx]
-            if not cands:
-                continue
-
-            def score(nw: Dict[str, float]) -> float:
-                dx = abs(nw["cx"] - anchor_x)
-                return dx - (nw["conf"] * 0.4)  # lower is better
-
-            best = min(cands, key=score)
-            results[st] = max(results.get(st, 0), _to_int(best["t"]))
-
-        if not results:
-            return {}
-
-        for st in ShardType:
-            results.setdefault(st, 0)
-
-        return results
+        # 3) map top five rows to shard order
+        best_rows = sorted(best_rows, key=lambda r: r["cy"])[:5]
+        vals = [_to_int(r["t"]) for r in best_rows]
+        order = [ShardType.MYSTERY, ShardType.ANCIENT, ShardType.VOID, ShardType.PRIMAL, ShardType.SACRED]
+        result = {st: 0 for st in order}
+        for st, v in zip(order, vals):
+            result[st] = v
+        return result
     except Exception:
         return {}
