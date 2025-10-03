@@ -2,6 +2,8 @@ from __future__ import annotations
 import asyncio
 from typing import Dict, Tuple, Optional, List
 from datetime import datetime, timezone
+import time
+import logging
 import discord
 from discord.ext import commands
 
@@ -10,7 +12,9 @@ from . import sheets_adapter as SA
 from .views import SetCountsModal, AddPullsStart, AddPullsCount, AddPullsRarities
 from .renderer import build_summary_embed
 import io
-from .ocr import extract_counts_from_image_bytes
+from .ocr import extract_counts_from_image_bytes, ocr_runtime_info, ocr_smoke_test
+
+log = logging.getLogger("c1c-claims")
 
 UTC = timezone.utc
 
