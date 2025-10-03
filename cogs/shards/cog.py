@@ -27,7 +27,18 @@ class ShardsCog(commands.Cog):
         self.bot = bot
         self.cfg, self.clans = SA.load_config()  # wire to Sheets
         self._live_views: Dict[int, discord.ui.View] = {}  # keep views referenced until timeout
-        self._ocr_cache: Dict[int, Dict[ShardType, int]] = {}  # cache OCR per source message id  ← ADDED
+        
+        # Log OCR stack once for visibility
+        try:
+            info = ocr_runtime_info()
+            if info:
+                log.info("[ocr] tesseract=%s | pytesseract=%s | pillow=%s",
+                         info.get("tesseract_version"), info.get("pytesseract_version"), info.get("pillow_version"))
+            else:
+                log.warning("[ocr] runtime info unavailable (pytesseract/Pillow not importable)")
+        except Exception:
+            log.exception("[ocr] failed to query OCR runtime info")
+
 
     # ---------- GUARDS ----------
     def _clan_for_member(self, member: discord.Member) -> Optional[str]:
@@ -154,9 +165,46 @@ class ShardsCog(commands.Cog):
         
         asyncio.create_task(_drop())
 
+    # ---------- OCR DIAGNOSTICS ----------
+    @commands.command(name="ocr")
+    async def ocr_cmd(self, ctx: commands.Context, sub: Optional[str] = None):
+        """
+        Staff diagnostics:
+          • !ocr info      → show OCR versions
+          • !ocr selftest  → run '12345' smoke test
+        """
+        # optional: restrict to staff
+        if not _has_any_role(ctx.author, getattr(self.cfg, "roles_staff_override", [])):
+            return await ctx.reply("Staff only.", mention_author=False)
+
+        s = (sub or "").strip().lower()
+        if s in ("info", "ver", "version"):
+            info = ocr_runtime_info()
+            if not info:
+                return await ctx.reply("OCR runtime info unavailable (pytesseract/Pillow not importable).", mention_author=False)
+            return await ctx.reply(
+                f"Tesseract: **{info.get('tesseract_version','?')}** | "
+                f"pytesseract: **{info.get('pytesseract_version','?')}** | "
+                f"Pillow: **{info.get('pillow_version','?')}**",
+                mention_author=False
+            )
+
+        if s in ("selftest", "test"):
+            t0 = time.perf_counter()
+            ok, text = ocr_smoke_test()
+            ms = int((time.perf_counter() - t0) * 1000)
+            status = "PASS ✅" if ok else "FAIL ❌"
+            return await ctx.reply(
+                f"OCR self-test: **{status}** in **{ms} ms**. Read: `{text or '∅'}` (expected `12345`).",
+                mention_author=False
+            )
+
+        await ctx.reply("Usage: `!ocr info` or `!ocr selftest`.", mention_author=False)
+
     # ---------- COMMANDS ----------
     @commands.command(name="shards")
     async def shards_cmd(self, ctx: commands.Context, sub: Optional[str] = None, *, tail: Optional[str] = None):
+:
         if not isinstance(ctx.channel, discord.Thread) or not self._is_shard_thread(ctx.channel):
             await ctx.reply("This command only works in your clan’s shard thread.")
             return
