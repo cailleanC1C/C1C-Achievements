@@ -154,6 +154,47 @@ def extract_counts_from_image_bytes(data: bytes) -> Dict[ShardType, int]:
         result = {st: 0 for st in order}
         for st, v in zip(order, vals):
             result[st] = v
-        return result
+        return results
     except Exception:
         return {}
+
+# --- OCR runtime helpers (for diagnostics) ---
+
+def ocr_runtime_info() -> dict | None:
+    """Return versions for tesseract, pytesseract, Pillow; None if libs unavailable."""
+    try:
+        import pytesseract
+        from PIL import Image
+        info = {
+            "tesseract_version": str(getattr(pytesseract, "get_tesseract_version")()),
+            "pytesseract_version": getattr(pytesseract, "__version__", "?"),
+            "pillow_version": getattr(Image, "__version__", "?"),
+        }
+        return info
+    except Exception:
+        return None
+
+
+def ocr_smoke_test() -> tuple[bool, str]:
+    """
+    Render '12345' into an in-memory image and OCR it.
+    Returns (ok, text) where ok is True if text == '12345'.
+    """
+    try:
+        import pytesseract
+        from PIL import Image, ImageDraw, ImageFont
+        import re as _re
+
+        # white canvas with black digits
+        img = Image.new("L", (240, 80), 255)
+        d = ImageDraw.Draw(img)
+        # default bitmap font is fine; high contrast makes OCR trivial
+        d.text((10, 10), "12345", fill=0, font=ImageFont.load_default())
+
+        cfg = "--psm 7 -c tessedit_char_whitelist=0123456789"
+        raw = pytesseract.image_to_string(img, config=cfg)
+        just_digits = _re.sub(r"\D+", "", raw or "")
+        return (just_digits == "12345", just_digits)
+    except Exception:
+        return (False, "")
+
