@@ -1,375 +1,187 @@
 # cogs/shards/ocr.py
 from __future__ import annotations
+import io, re
+from typing import Dict, List, Optional
 
-import io
-import re
-from typing import Dict, List, Optional, Tuple
-
-# Local enum
 from .constants import ShardType
 
-# ---------- Robust numeric parsing ----------
-# Accept "1,610" / "1.610" / "1 610" / "1610"
+# Accept "3,584" / "3.584" / "3 584"
 _NUM_RE = re.compile(r"^\d{1,4}(?:[.,\s]\d{3})*$")
 
+ORDER_TOP_TO_BOTTOM: List[ShardType] = [
+    ShardType.MYSTERY,
+    ShardType.ANCIENT,
+    ShardType.VOID,
+    ShardType.PRIMAL,
+    ShardType.SACRED,
+]
 
 def _normalize_digits(s: str) -> str:
-    """
-    Fix common OCR slips: l/İ/I → 1, O/º → 0. Keep punctuation for grouping.
-    """
-    tbl = str.maketrans(
-        {
-            "l": "1",
-            "I": "1",
-            "İ": "1",
-            "í": "1",
-            "O": "0",
-            "o": "0",
-            "º": "0",
-        }
-    )
+    # common OCR slips → digits
+    tbl = str.maketrans({
+        "l": "1", "I": "1", "İ": "1", "í": "1",
+        "O": "0", "o": "0", "º": "0",
+        "\u00A0": " ",  # NBSP → space
+    })
     return (s or "").translate(tbl)
-
 
 def _to_int(num_text: str) -> int:
     s = _normalize_digits(num_text).replace(",", "").replace(".", "").replace(" ", "")
     return int(s) if s.isdigit() else 0
 
-
 def _scale_if_small(w: int, h: int) -> float:
-    # Small mobile screenshots benefit from a 1.5–2.0x scale before OCR.
-    if w < 900:
+    if w < 900:   # small phone screenshot
         return 2.0
     if w < 1300:
         return 1.5
     return 1.0
 
+def _preprocess_roi(roi):
+    """grayscale → autocontrast → sharpen → invert (dark text on light bg)"""
+    from PIL import ImageOps, ImageFilter
+    img = ImageOps.grayscale(roi)
+    img = ImageOps.autocontrast(img)
+    img = img.filter(ImageFilter.UnsharpMask(radius=1.0, percent=120, threshold=3))
+    img = ImageOps.invert(img)
+    return img
 
-# Map normalized label → ShardType
-_LABEL_TO_ST: Dict[str, ShardType] = {
-    "mystery": ShardType.MYSTERY,
-    "ancient": ShardType.ANCIENT,
-    "void": ShardType.VOID,
-    "primal": ShardType.PRIMAL,
-    "sacred": ShardType.SACRED,
-}
+def _ocr_tokens(img, cfg: str):
+    """Return list of numeric tokens with geometry using image_to_data."""
+    import pytesseract
+    from pytesseract import Output
 
+    dd = pytesseract.image_to_data(img, output_type=Output.DICT, config=cfg)
+    tokens: List[dict] = []
+    n = len(dd["text"])
+    for i in range(n):
+        raw = (dd["text"][i] or "").strip()
+        if not raw:
+            continue
+        t = _normalize_digits(raw)
+        # keep only numeric-like strings
+        if not (_NUM_RE.match(t) or t.isdigit()):
+            continue
+        try:
+            conf = float(dd["conf"][i])
+        except Exception:
+            conf = -1.0
+        if conf < 5:  # be permissive; small UI digits score low
+            continue
+        x = int(dd["left"][i]); y = int(dd["top"][i])
+        w = int(dd["width"][i]); h = int(dd["height"][i])
+        tokens.append({
+            "t": t, "conf": conf,
+            "x": x, "y": y, "w": w, "h": h,
+            "cx": x + w / 2, "cy": y + h / 2,
+        })
+    return tokens
 
-def _label_key(raw: str) -> Optional[str]:
-    """
-    Normalize a token to a shard label. Handles 'Ancient', 'Ancient Shard', 'Ancient Shards', etc.
-    Returns canonical key (e.g., 'ancient') or None if not a shard label.
-    """
-    cleaned = re.sub(r"[^a-z]", "", (raw or "").lower())
-    for suffix in ("shards", "shard"):
-        if cleaned.endswith(suffix):
-            cleaned = cleaned[: -len(suffix)]
-            break
-    cleaned = cleaned.rstrip("s")
-    return cleaned if cleaned in _LABEL_TO_ST else None
+def _cluster_rows(tokens: List[dict], img_h: int) -> List[dict]:
+    """Group tokens by vertical bands into up to 5 rows (top→bottom)."""
+    if not tokens:
+        return []
+    tokens = sorted(tokens, key=lambda k: k["cy"])
+    # estimate band height
+    hs = sorted(t["h"] for t in tokens)
+    med_h = hs[len(hs) // 2] if hs else max(20, img_h // 40)
+    band = max(22, int(med_h * 1.6))
 
+    rows: List[List[dict]] = []
+    cur: List[dict] = [tokens[0]]
+    last_y = tokens[0]["cy"]
 
-# ---------- OCR core ----------
+    for t in tokens[1:]:
+        if abs(t["cy"] - last_y) <= band:
+            cur.append(t)
+        else:
+            rows.append(cur)
+            cur = [t]
+        last_y = t["cy"]
+    rows.append(cur)
 
+    # choose best numeric per row
+    picked: List[dict] = []
+    for group in rows:
+        # score: wider & longer & higher conf preferred
+        def score(g):
+            return -(len(g["t"]) * 2 + g["w"] * 0.5 + g["conf"] * 0.2)
+        best = sorted(group, key=score)[0]
+        picked.append({"cy": int(sum(t["cy"] for t in group) / len(group)),
+                       "text": best["t"]})
+    # top→bottom
+    picked.sort(key=lambda k: k["cy"])
+    # keep first 5 rows; if fewer, return fewer
+    return picked[:5]
+
+def _fallback_line_scan(img):
+    """If token boxes fail, use image_to_string and grab one number per visual line."""
+    import pytesseract
+    text = pytesseract.image_to_string(
+        img,
+        config="--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789., "
+    ) or ""
+    rows: List[str] = []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        m = re.search(r"[0-9][0-9.,\s]*[0-9]", _normalize_digits(s))
+        if m:
+            rows.append(m.group(0))
+    return rows[:5]
 
 def extract_counts_from_image_bytes(data: bytes) -> Dict[ShardType, int]:
-    """
-    OCR shard counts from a screenshot.
-
-    Strategy:
-      1) Run a full-image pass for labels (pytesseract.image_to_data, psm 6).
-      2) Build a left-rail ROI for numbers, binarize & digit-whitelist OCR.
-      3) Match numbers to labels: for each label, select the closest number to the LEFT in the same horizontal band.
-      4) If labels fail, fall back to "5 rows of numbers" heuristic (top→bottom = Myst, Anc, Void, Pri, Sac).
-
-    Returns {ShardType: int}. Missing types default to 0.
-    """
+    """Return {ShardType: int} by scanning the left shard rail top→bottom."""
     try:
-        import pytesseract
-        from pytesseract import Output
-        from PIL import Image, ImageOps, ImageFilter
+        import pytesseract  # noqa: F401  (ensures import failure falls through)
+        from PIL import Image, ImageOps
     except Exception:
-        # OCR stack not available → return empty (caller will handle manual entry).
         return {}
 
     try:
-        # Load & normalize
         base = Image.open(io.BytesIO(data))
         base = ImageOps.exif_transpose(base)
 
-        # Scale small images for better OCR
+        # scale small screenshots for clarity
         scale = _scale_if_small(base.width, base.height)
         if scale != 1.0:
             base = base.resize((int(base.width * scale), int(base.height * scale)))
 
         W, H = base.width, base.height
 
-        # -------------------------
-        # PASS A: LABELS (full image words)
-        # -------------------------
-        lab_img = ImageOps.autocontrast(base)
-        lab_cfg = "--oem 3 --psm 6"
-        lab = pytesseract.image_to_data(lab_img, output_type=Output.DICT, config=lab_cfg)
-
-        words: List[Dict[str, float]] = []
-        for i in range(len(lab["text"])):
-            t = (lab["text"][i] or "").strip()
-            if not t:
-                continue
-            try:
-                conf = float(lab["conf"][i])
-            except Exception:
-                conf = -1.0
-            if conf < 35:
-                continue
-            x = int(lab["left"][i])
-            y = int(lab["top"][i])
-            w = int(lab["width"][i])
-            h = int(lab["height"][i])
-            words.append(
-                {
-                    "t": t,
-                    "x": x,
-                    "y": y,
-                    "w": w,
-                    "h": h,
-                    "cx": x + w / 2,
-                    "cy": y + h / 2,
-                    "conf": conf,
-                }
-            )
-
-        # Candidate labels
-        cand_labels: List[Dict[str, float]] = []
-        for w in words:
-            key = _label_key(w["t"])
-            if key:
-                cand_labels.append({**w, "label": key})
-
-        # Resolve one best token per shard type (highest conf)
-        labels: List[Dict[str, float]] = []
-        if cand_labels:
-            by_type: Dict[ShardType, Dict[str, float]] = {}
-            for lab in cand_labels:
-                st = _LABEL_TO_ST[lab["label"]]
-                prev = by_type.get(st)
-                if not prev or lab["conf"] > prev["conf"]:
-                    by_type[st] = lab
-            labels = list(by_type.values())
-
-        # -------------------------
-        # PASS B: NUMBERS (left rail ROI)
-        # -------------------------
-        # Determine ROI width: left 45%–60%, but at least a bit past the farthest label we found
-        if labels:
-            max_label_edge = max(lab["x"] + lab["w"] for lab in labels)
-            roi_x2 = min(W, int(max(W * 0.55, max_label_edge + W * 0.20)))
-        else:
-            roi_x2 = int(W * 0.5)
-        roi_x2 = max(roi_x2, int(W * 0.35))
+        # Fixed left-rail crop: 55% of width works across both layouts
+        roi_x2 = int(W * 0.55)
         roi = base.crop((0, 0, roi_x2, H))
-        
-        # Preprocess: grayscale → autocontrast → sharpen → invert
-        num_img = ImageOps.grayscale(roi)
-        num_img = ImageOps.autocontrast(num_img)
-        num_img = num_img.filter(ImageFilter.UnsharpMask(radius=1.0, percent=120, threshold=3))
-        # Tesseract is stronger with dark text on light background; invert helps here.
-        num_img = ImageOps.invert(num_img)
-        
-        # Sparse text works well for scattered numbers; keep a strict digits whitelist.
-        num_cfg = (
-            "--oem 3 --psm 11 "
-            "-c tessedit_char_whitelist=0123456789., "
-            "-c preserve_interword_spaces=1 "
-            "-c classify_bln_numeric_mode=1"
-        )
-        nd = pytesseract.image_to_data(num_img, output_type=Output.DICT, config=num_cfg)
-        
-        nums = []
-        for i in range(len(nd["text"])):
-            raw = (nd["text"][i] or "").strip()
-            if not raw:
-                continue
-            t = _normalize_digits(raw)
-            t_for_match = t.replace("\u00A0", " ")
-            if not (_NUM_RE.match(t_for_match) or t_for_match.isdigit()):
-                continue
-            try:
-                conf = float(nd["conf"][i])
-            except Exception:
-                conf = -1.0
-            # Be permissive; small UI digits often score low but are still correct.
-            if conf < 5:
-                continue
-            x = int(nd["left"][i]); y = int(nd["top"][i])
-            w = int(nd["width"][i]); h = int(nd["height"][i])
-            nums.append({"t": t, "x": x, "y": y, "w": w, "h": h,
-                         "cx": x + w / 2, "cy": y + h / 2, "conf": conf})
-        
-        # Fallback: if tokenization fails, OCR the whole ROI as lines and mine numbers.
-        if not nums:
-            text_full = pytesseract.image_to_string(
-                num_img,
-                config="--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789., "
-            ) or ""
-            # Keep one numeric cluster per visual line (top→bottom comes from the string)
-            line_nums: List[str] = []
-            for line in text_full.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                m = re.search(r"[0-9][0-9.,\s]*[0-9]", line)
-                if m:
-                    line_nums.append(m.group(0))
-            # Convert to pseudo tokens without geometry (the row fallback below only needs order)
-            cy_step = H / max(5, len(line_nums) or 5)
-            for idx, s in enumerate(line_nums):
-                nums.append({
-                    "t": _normalize_digits(s),
-                    "x": 0, "y": int(idx * cy_step), "w": 0, "h": 0,
-                    "cx": 0, "cy": int(idx * cy_step),
-                    "conf": 5.0,
-                })
-        
-        if not nums:
-            return {}
+        num_img = _preprocess_roi(roi)
 
+        # Try multiple PSMs for robustness
+        cfgs = [
+            "--oem 3 --psm 11 -c tessedit_char_whitelist=0123456789., -c preserve_interword_spaces=1 -c classify_bln_numeric_mode=1",
+            "--oem 3 --psm 6  -c tessedit_char_whitelist=0123456789., -c preserve_interword_spaces=1 -c classify_bln_numeric_mode=1",
+            "--oem 3 --psm 7  -c tessedit_char_whitelist=0123456789., -c preserve_interword_spaces=1 -c classify_bln_numeric_mode=1",
+        ]
 
+        tokens: List[dict] = []
+        for cfg in cfgs:
+            tokens = _ocr_tokens(num_img, cfg)
+            if tokens:
+                break
+
+        rows: List[dict] = _cluster_rows(tokens, H)
+        if not rows:
+            # string fallback (no geometry); build pseudo rows
+            ls = _fallback_line_scan(num_img)
+            rows = [{"cy": i, "text": s} for i, s in enumerate(ls)]
+
+        # Map rows to shard order (top→bottom). If we got fewer than 5, fill with 0.
         results: Dict[ShardType, int] = {}
-
-        # -------------------------
-        # Preferred: label-driven matching (numbers to the LEFT of label in same band)
-        # -------------------------
-        if labels:
-            for lab in labels:
-                st = _LABEL_TO_ST[lab["label"]]
-                # Horizontal band around the label row
-                band_top = lab["cy"] - max(22, lab["h"] * 1.2)
-                band_bot = lab["cy"] + max(22, lab["h"] * 1.2)
-
-                # candidates LEFT of label
-                cands = [n for n in nums if (band_top <= n["cy"] <= band_bot) and (n["cx"] < lab["x"])]
-                if not cands:
-                    # Wider tolerance on Y if DPI weird
-                    cands = [n for n in nums if (abs(n["cy"] - lab["cy"]) <= max(32, lab["h"] * 1.6)) and (n["cx"] < lab["x"])]
-                if not cands:
-                    continue
-
-                # Choose closest on X (to the left) with a small confidence bonus
-                def score(nw: Dict[str, float]) -> float:
-                    dx = lab["x"] - nw["cx"]
-                    return dx - (nw["conf"] * 0.4)  # lower is better
-
-                best = min(cands, key=score)
-                val = _to_int(best["t"])
-                if val:
-                    results[st] = max(results.get(st, 0), val)
-
-        # -------------------------
-        # Fallback: group numbers into 5 rows (top→bottom map to Myst/Anc/Void/Pri/Sac)
-        # -------------------------
-        if not results:
-            # Group by Y proximity. We merge tokens that are within a vertical gap threshold.
-            tokens = sorted(nums, key=lambda n: n["cy"])
-
-            groups: List[List[Dict[str, float]]] = []
-            for tok in tokens:
-                placed = False
-                for g in groups:
-                    # Compare to the group's median Y (use first token's cy as seed)
-                    gy = sum(t["cy"] for t in g) / len(g)
-                    if abs(tok["cy"] - gy) <= max(22, (g[0]["h"] * 1.2)):
-                        g.append(tok)
-                        placed = True
-                        break
-                if not placed:
-                    groups.append([tok])
-
-            # Reduce each group to a single "best number" by highest confidence / largest width
-            def best_in_group(g: List[Dict[str, float]]) -> Dict[str, float]:
-                return max(g, key=lambda t: (t["conf"], t["w"]))
-
-            rows = [best_in_group(g) for g in groups]
-            # Heuristic: pick the 5 rows most likely to be shard counts (largest width or confidence),
-            # then sort by Y (top→bottom).
-            rows = sorted(rows, key=lambda t: (t["conf"], t["w"]), reverse=True)[:5]
-            rows = sorted(rows, key=lambda t: t["cy"])
-
-            order = [
-                ShardType.MYSTERY,
-                ShardType.ANCIENT,
-                ShardType.VOID,
-                ShardType.PRIMAL,
-                ShardType.SACRED,
-            ]
-            for st, row in zip(order, rows):
-                val = _to_int(row["t"])
-                results[st] = max(results.get(st, 0), val)
-
-        # Fill missing with zeros for consistency
-        for st in ShardType:
-            results.setdefault(st, 0)
+        for idx, st in enumerate(ORDER_TOP_TO_BOTTOM):
+            if idx < len(rows):
+                results[st] = _to_int(rows[idx]["text"])
+            else:
+                results[st] = 0
 
         return results
     except Exception:
-        # On any runtime error, fail-soft with {}
+        # On any unexpected error we fail safe.
         return {}
-
-
-# ---------- Runtime diagnostics ----------
-
-
-def ocr_runtime_info() -> Optional[Dict[str, str]]:
-    """
-    Returns versions for tesseract, pytesseract, and Pillow if available; else None.
-    """
-    try:
-        import pytesseract
-        from PIL import Image
-
-        # tesseract --version output (first line)
-        try:
-            import subprocess
-
-            out = subprocess.check_output(["tesseract", "--version"], stderr=subprocess.STDOUT, text=True)
-            first_line = out.splitlines()[0].strip() if out else "tesseract (unknown)"
-        except Exception:
-            first_line = "tesseract (unavailable)"
-
-        return {
-            "tesseract_version": first_line,
-            "pytesseract_version": getattr(pytesseract, "__version__", "?"),
-            "pillow_version": getattr(Image, "PILLOW_VERSION", None)
-            or getattr(Image, "__version__", "?"),
-        }
-    except Exception:
-        return None
-
-
-def ocr_smoke_test() -> Tuple[bool, Optional[str]]:
-    """
-    Renders '12345' and OCRs it. Returns (ok, text_read).
-    ok=True if digits-only of OCR result equal '12345'.
-    """
-    try:
-        import pytesseract
-        from PIL import Image, ImageDraw, ImageOps
-
-        # White background, black text using default bitmap font
-        W, H = 240, 80
-        img = Image.new("L", (W, H), 255)
-        d = ImageDraw.Draw(img)
-        text = "12345"
-        # Draw in the middle-ish with default font
-        d.text((20, 20), text, fill=0)
-
-        # Slight enlarge to help OCR
-        img2 = img.resize((W * 2, H * 2))
-        img2 = ImageOps.autocontrast(img2)
-
-        cfg = "--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789"
-        raw = pytesseract.image_to_string(img2, config=cfg) or ""
-        digits = re.sub(r"\D+", "", raw)
-        return (digits == "12345", raw.strip() or digits or "")
-    except Exception:
-        return (False, None)
