@@ -22,6 +22,7 @@ class ShardsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.cfg, self.clans = SA.load_config()  # wire to Sheets
+        self._live_views: Dict[int, discord.ui.View] = {}  # ← ADDED: keep views alive while buttons are clickable
 
     # ---------- GUARDS ----------
     def _clan_for_member(self, member: discord.Member) -> Optional[str]:
@@ -83,7 +84,18 @@ class ShardsCog(commands.Cog):
         
         btn.callback = _open_modal
         view.add_item(btn)
-        await message.channel.send("Spotted a shard screen. Want me to read it?", view=view)
+        msg = await message.channel.send("Spotted a shard screen. Want me to read it?", view=view)  # ← CHANGED
+        self._live_views[msg.id] = view  # ← ADDED
+        
+        # (Optional tidy-up) drop the ref after the view times out
+        async def _drop():
+            try:
+                await asyncio.sleep((view.timeout or 120) + 5)
+            except Exception:
+                pass
+            self._live_views.pop(msg.id, None)
+        
+        asyncio.create_task(_drop())  # ← ADDED
 
     # ---------- COMMANDS ----------
     @commands.command(name="shards")
