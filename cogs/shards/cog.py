@@ -24,7 +24,6 @@ from .ocr import (
 UTC = timezone.utc
 log = logging.getLogger("c1c-claims")
 
-
 def _has_any_role(member: discord.Member, role_ids: List[int]) -> bool:
     rids = {r.id for r in member.roles}
     return any(r in rids for r in role_ids)
