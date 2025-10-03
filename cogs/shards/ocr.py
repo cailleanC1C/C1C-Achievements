@@ -168,56 +168,72 @@ def extract_counts_from_image_bytes(data: bytes) -> Dict[ShardType, int]:
             roi_x2 = int(W * 0.5)
         roi_x2 = max(roi_x2, int(W * 0.35))
         roi = base.crop((0, 0, roi_x2, H))
-
-        # Enhance digits
+        
+        # Preprocess: grayscale → autocontrast → sharpen → invert
         num_img = ImageOps.grayscale(roi)
         num_img = ImageOps.autocontrast(num_img)
         num_img = num_img.filter(ImageFilter.UnsharpMask(radius=1.0, percent=120, threshold=3))
-        # hard threshold to make digits crisp; 160 is a decent mid-point for this UI
-        num_img = num_img.point(lambda p: 255 if p > 160 else 0)
-
+        # Tesseract is stronger with dark text on light background; invert helps here.
+        num_img = ImageOps.invert(num_img)
+        
+        # Sparse text works well for scattered numbers; keep a strict digits whitelist.
         num_cfg = (
-            "--oem 3 --psm 6 "
+            "--oem 3 --psm 11 "
             "-c tessedit_char_whitelist=0123456789., "
             "-c preserve_interword_spaces=1 "
             "-c classify_bln_numeric_mode=1"
         )
         nd = pytesseract.image_to_data(num_img, output_type=Output.DICT, config=num_cfg)
-
-        nums: List[Dict[str, float]] = []
+        
+        nums = []
         for i in range(len(nd["text"])):
             raw = (nd["text"][i] or "").strip()
             if not raw:
                 continue
             t = _normalize_digits(raw)
-            t_for_match = t.replace("\u00A0", " ")  # non-breaking space
+            t_for_match = t.replace("\u00A0", " ")
             if not (_NUM_RE.match(t_for_match) or t_for_match.isdigit()):
                 continue
             try:
                 conf = float(nd["conf"][i])
             except Exception:
                 conf = -1.0
-            if conf < 30:
+            # Be permissive; small UI digits often score low but are still correct.
+            if conf < 5:
                 continue
-            x = int(nd["left"][i])
-            y = int(nd["top"][i])
-            w = int(nd["width"][i])
-            h = int(nd["height"][i])
-            nums.append(
-                {
-                    "t": t,
-                    "x": x,
-                    "y": y,
-                    "w": w,
-                    "h": h,
-                    "cx": x + w / 2,
-                    "cy": y + h / 2,
-                    "conf": conf,
-                }
-            )
-
+            x = int(nd["left"][i]); y = int(nd["top"][i])
+            w = int(nd["width"][i]); h = int(nd["height"][i])
+            nums.append({"t": t, "x": x, "y": y, "w": w, "h": h,
+                         "cx": x + w / 2, "cy": y + h / 2, "conf": conf})
+        
+        # Fallback: if tokenization fails, OCR the whole ROI as lines and mine numbers.
+        if not nums:
+            text_full = pytesseract.image_to_string(
+                num_img,
+                config="--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789., "
+            ) or ""
+            # Keep one numeric cluster per visual line (top→bottom comes from the string)
+            line_nums: List[str] = []
+            for line in text_full.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                m = re.search(r"[0-9][0-9.,\s]*[0-9]", line)
+                if m:
+                    line_nums.append(m.group(0))
+            # Convert to pseudo tokens without geometry (the row fallback below only needs order)
+            cy_step = H / max(5, len(line_nums) or 5)
+            for idx, s in enumerate(line_nums):
+                nums.append({
+                    "t": _normalize_digits(s),
+                    "x": 0, "y": int(idx * cy_step), "w": 0, "h": 0,
+                    "cx": 0, "cy": int(idx * cy_step),
+                    "conf": 5.0,
+                })
+        
         if not nums:
             return {}
+
 
         results: Dict[ShardType, int] = {}
 
