@@ -175,29 +175,37 @@ class ShardsCog(commands.Cog):
         """
         # optional: restrict to staff
         if not _has_any_role(ctx.author, getattr(self.cfg, "roles_staff_override", [])):
-            return await ctx.reply("Staff only.", mention_author=False)
+            await ctx.reply("Staff only.", mention_author=False)
+            return
 
         s = (sub or "").strip().lower()
         if s in ("info", "ver", "version"):
             info = ocr_runtime_info()
             if not info:
-                return await ctx.reply("OCR runtime info unavailable (pytesseract/Pillow not importable).", mention_author=False)
-            return await ctx.reply(
+                await ctx.reply(
+                    "OCR runtime info unavailable (pytesseract/Pillow not importable).",
+                    mention_author=False
+                )
+                return
+            await ctx.reply(
                 f"Tesseract: **{info.get('tesseract_version','?')}** | "
                 f"pytesseract: **{info.get('pytesseract_version','?')}** | "
                 f"Pillow: **{info.get('pillow_version','?')}**",
                 mention_author=False
             )
+            return
 
         if s in ("selftest", "test"):
             t0 = time.perf_counter()
             ok, text = ocr_smoke_test()
             ms = int((time.perf_counter() - t0) * 1000)
             status = "PASS ✅" if ok else "FAIL ❌"
-            return await ctx.reply(
-                f"OCR self-test: **{status}** in **{ms} ms**. Read: `{text or '∅'}` (expected `12345`).",
+            await ctx.reply(
+                f"OCR self-test: **{status}** in **{ms} ms**. "
+                f"Read: `{text or '∅'}` (expected `12345`).",
                 mention_author=False
             )
+            return
 
         await ctx.reply("Usage: `!ocr info` or `!ocr selftest`.", mention_author=False)
 
