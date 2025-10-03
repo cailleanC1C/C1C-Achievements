@@ -22,7 +22,7 @@ class ShardsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.cfg, self.clans = SA.load_config()  # wire to Sheets
-        self._live_views: Dict[int, discord.ui.View] = {}  # ← ADDED: keep views alive while buttons are clickable
+        self._live_views: Dict[int, discord.ui.View] = {}  # keep views referenced until timeout
 
     # ---------- GUARDS ----------
     def _clan_for_member(self, member: discord.Member) -> Optional[str]:
@@ -79,15 +79,29 @@ class ShardsCog(commands.Cog):
                 await inter.response.send_message("Only the image author or staff can review this.", ephemeral=True)
                 return
             prefill = await self._ocr_prefill_from_attachment(images[0])
-            modal = SetCountsModal(prefill=prefill, on_submit_cb=_submit_counts)
+            modal = SetCountsModal(prefill=prefill)  # no on_submit_cb
             await inter.response.send_modal(modal)
-        
+            
+            # wait for the user to submit the modal, then parse and save
+            timed_out = await modal.wait()
+            if timed_out:
+                return
+            counts = modal.parse_counts()
+            if not any(counts.values()):
+                await inter.followup.send("No numbers provided.", ephemeral=True)
+                return
+            
+            clan_tag = self._clan_tag_for_thread(message.channel.id) or ""
+            SA.append_snapshot(message.author.id, message.author.display_name, clan_tag, counts, "manual", message.jump_url)
+            await self._refresh_summary_for_clan(clan_tag)
+            await inter.followup.send("Counts saved. Summary updated.", ephemeral=True)
+
         btn.callback = _open_modal
         view.add_item(btn)
-        msg = await message.channel.send("Spotted a shard screen. Want me to read it?", view=view)  # ← CHANGED
-        self._live_views[msg.id] = view  # ← ADDED
+        msg = await message.channel.send("Spotted a shard screen. Want me to read it?", view=view)
+        self._live_views[msg.id] = view
         
-        # (Optional tidy-up) drop the ref after the view times out
+        # tidy up the ref after timeout
         async def _drop():
             try:
                 await asyncio.sleep((view.timeout or 120) + 5)
@@ -95,7 +109,7 @@ class ShardsCog(commands.Cog):
                 pass
             self._live_views.pop(msg.id, None)
         
-        asyncio.create_task(_drop())  # ← ADDED
+        asyncio.create_task(_drop())
 
     # ---------- COMMANDS ----------
     @commands.command(name="shards")
@@ -138,16 +152,20 @@ class ShardsCog(commands.Cog):
             if inter.user.id != ctx.author.id:
                 await inter.response.send_message("This button is not for you.", ephemeral=True); return
         
-            async def _submit_counts(modal_inter: discord.Interaction, counts: Dict[ShardType, int]):
-                if not any(counts.values()):
-                    await modal_inter.response.send_message("No numbers provided.", ephemeral=True); return
-                clan_tag = self._clan_tag_for_thread(ctx.channel.id) or (self._clan_for_member(target) or "")
-                SA.append_snapshot(target.id, target.display_name, clan_tag, counts, "manual", ctx.message.jump_url)
-                await self._refresh_summary_for_clan(clan_tag)
-                await modal_inter.response.send_message("Counts saved. Summary updated.", ephemeral=True)
-        
-            modal = SetCountsModal(prefill=None, on_submit_cb=_submit_counts)
+            modal = SetCountsModal(prefill=None)  # no on_submit_cb
             await inter.response.send_modal(modal)
+        
+            timed_out = await modal.wait()
+            if timed_out:
+                return
+            counts = modal.parse_counts()
+            if not any(counts.values()):
+                await inter.followup.send("No numbers provided.", ephemeral=True); return
+        
+            clan_tag = self._clan_tag_for_thread(ctx.channel.id) or (self._clan_for_member(target) or "")
+            SA.append_snapshot(target.id, target.display_name, clan_tag, counts, "manual", ctx.message.jump_url)
+            await self._refresh_summary_for_clan(clan_tag)
+            await inter.followup.send("Counts saved. Summary updated.", ephemeral=True)
 
         btn.callback = _open
         view.add_item(btn)
