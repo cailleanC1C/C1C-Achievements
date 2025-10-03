@@ -1,4 +1,6 @@
+# cogs/shards/cog.py
 from __future__ import annotations
+
 import asyncio
 import logging
 import time
@@ -12,7 +14,12 @@ from .constants import ShardType, Rarity, DISPLAY_ORDER
 from . import sheets_adapter as SA
 from .views import SetCountsModal, AddPullsStart, AddPullsCount, AddPullsRarities
 from .renderer import build_summary_embed
-from .ocr import extract_counts_from_image_bytes, extract_counts_with_debug
+from .ocr import (
+    extract_counts_from_image_bytes,
+    extract_counts_with_debug,
+    ocr_runtime_info,
+    ocr_smoke_test,
+)
 
 UTC = timezone.utc
 log = logging.getLogger("c1c-claims")
@@ -24,6 +31,7 @@ def _has_any_role(member: discord.Member, role_ids: List[int]) -> bool:
 
 
 def _is_image_attachment(att: discord.Attachment) -> bool:
+    """Lenient check for images (content-type or filename)."""
     ct = (att.content_type or "").lower().split(";")[0].strip()
     if ct.startswith("image/"):
         return True
@@ -42,8 +50,12 @@ class ShardsCog(commands.Cog):
         try:
             info = ocr_runtime_info()
             if info:
-                log.info("[ocr] tesseract=%s | pytesseract=%s | pillow=%s",
-                         info.get("tesseract_version"), info.get("pytesseract_version"), info.get("pillow_version"))
+                log.info(
+                    "[ocr] tesseract=%s | pytesseract=%s | pillow=%s",
+                    info.get("tesseract_version"),
+                    info.get("pytesseract_version"),
+                    info.get("pillow_version"),
+                )
             else:
                 log.warning("[ocr] runtime info unavailable (pytesseract/Pillow not importable)")
         except Exception:
@@ -72,29 +84,30 @@ class ShardsCog(commands.Cog):
         try:
             data = await att.read()
             counts = extract_counts_from_image_bytes(data) or {}
+            # normalize missing keys
+            for st in ShardType:
+                counts.setdefault(st, 0)
             return counts
         except Exception:
-            return {}
+            return {st: 0 for st in ShardType}
 
     # ---------- UTIL: formatting ----------
     def _emoji_or_abbr(self, st: ShardType) -> str:
-        # Try custom emoji map from config; else fallback to abbreviations.
+        """Try custom emoji from config; else fallback to colored label."""
         emap = getattr(self.cfg, "emoji", None) or {}
-        # Expected keys could be like "Myst", "Anc", etc. We’ll map robustly by ShardType.
         fallback = {
             ShardType.MYSTERY: "🟩Myst",
             ShardType.ANCIENT: "🟦Anc",
-            ShardType.VOID:    "🟪Void",
-            ShardType.PRIMAL:  "🟥Pri",
-            ShardType.SACRED:  "🟨Sac",
+            ShardType.VOID: "🟪Void",
+            ShardType.PRIMAL: "🟥Pri",
+            ShardType.SACRED: "🟨Sac",
         }
-        # Attempt different common keys from your config, else fallback
         key_map = {
             ShardType.MYSTERY: ("Myst", "Mystery"),
             ShardType.ANCIENT: ("Anc", "Ancient"),
-            ShardType.VOID:    ("Void",),
-            ShardType.PRIMAL:  ("Pri", "Primal"),
-            ShardType.SACRED:  ("Sac", "Sacred"),
+            ShardType.VOID: ("Void",),
+            ShardType.PRIMAL: ("Pri", "Primal"),
+            ShardType.SACRED: ("Sac", "Sacred"),
         }
         for k in key_map.get(st, ()):
             val = emap.get(k)
@@ -109,7 +122,6 @@ class ShardsCog(commands.Cog):
             label = self._emoji_or_abbr(st)
             num = counts.get(st, 0)
             parts.append(f"{label} {num}")
-        # Desired spacing: 🟩Myst 987 · 🟦Anc 123 · ...
         return " · ".join(parts)
 
     # ---------- WATCHER: images in shard threads ----------
@@ -124,101 +136,75 @@ class ShardsCog(commands.Cog):
         if not (message.attachments and any(_is_image_attachment(a) for a in message.attachments)):
             return
 
-        # Build the images list for OCR
         images = [a for a in message.attachments if _is_image_attachment(a)]
         if not images:
             return
-        # --- DEBUG OCR: run in background and post ROI images only if OCR finds all zeros ---
+
+        # Post ROI debug images (only when OCR returns all zeros) to help tuning
         async def _ocr_debug_background():
             try:
-                if not images:
-                    return
                 data = await images[0].read()
                 counts, dbg_imgs = extract_counts_with_debug(data)
-                # only post debug images if everything read as zero to avoid noise
                 if sum(counts.values()) == 0 and dbg_imgs:
                     import io as _io
-                    files = [
-                        discord.File(_io.BytesIO(b), filename=name)
-                        for name, b in dbg_imgs
-                    ]
+                    files = [discord.File(_io.BytesIO(b), filename=name) for name, b in dbg_imgs]
                     await message.channel.send(
-                        content="(OCR debug) Left-rail ROI I’m reading (grayscale + binarized). "
-                                "If this looks wrong, we’ll tweak crop/threshold.",
-                        files=files
+                        content="(OCR debug) Left-rail ROI I’m reading (grayscale + binarized).",
+                        files=files,
                     )
             except Exception:
-                # swallow errors; this is debug-only
                 pass
 
         asyncio.create_task(_ocr_debug_background())
 
-        # Post a simple public prompt with two buttons
+        # Public prompt with buttons
         view = discord.ui.View(timeout=300)
         scan_btn = discord.ui.Button(
-            label="Scan Image",
-            style=discord.ButtonStyle.primary,
-            custom_id=f"shards:scan:{message.id}"
+            label="Scan Image", style=discord.ButtonStyle.primary, custom_id=f"shards:scan:{message.id}"
         )
         dismiss_btn = discord.ui.Button(
-            label="Dismiss",
-            style=discord.ButtonStyle.secondary,
-            custom_id=f"shards:dismiss:{message.id}"
+            label="Dismiss", style=discord.ButtonStyle.secondary, custom_id=f"shards:dismiss:{message.id}"
         )
 
         async def _scan_callback(inter: discord.Interaction):
             # Only the image author or staff
-            if inter.user.id != message.author.id and not _has_any_role(inter.user, getattr(self.cfg, "roles_staff_override", [])):
+            if inter.user.id != message.author.id and not _has_any_role(
+                inter.user, getattr(self.cfg, "roles_staff_override", [])
+            ):
                 try:
                     await inter.response.send_message("Only the image author or staff can scan this.", ephemeral=True)
                 except Exception:
                     pass
                 return
 
-            # Immediate defer to avoid Unknown interaction
+            # Defer quickly to avoid Unknown interaction
             try:
                 await inter.response.defer(ephemeral=True, thinking=True)
             except Exception:
-                # If already acknowledged, fine
                 pass
 
-            # OCR with cache
             cache_key = (message.guild.id if message.guild else 0, message.channel.id, message.id)
             counts = self._ocr_cache.get(cache_key)
             if not counts:
-                try:
-                    counts = await self._ocr_prefill_from_attachment(images[0])
-                except Exception:
-                    counts = {}
-                # Fill missing keys with 0 for display consistency
-                for st in ShardType:
-                    counts.setdefault(st, 0)
+                counts = await self._ocr_prefill_from_attachment(images[0])
                 self._ocr_cache[cache_key] = counts
 
             preview = self._fmt_counts_line(counts)
 
-            # Build ephemeral view: Use, Manual, Retry, Close
+            # Ephemeral control panel
             eview = discord.ui.View(timeout=180)
 
             use_btn = discord.ui.Button(
-                label="Use these counts",
-                style=discord.ButtonStyle.success,
-                custom_id=f"shards:use:{message.id}"
+                label="Use these counts", style=discord.ButtonStyle.success, custom_id=f"shards:use:{message.id}"
             )
             manual_btn = discord.ui.Button(
-                label="Manual entry",
-                style=discord.ButtonStyle.primary,
-                custom_id=f"shards:manual:{message.id}"
+                label="Manual entry", style=discord.ButtonStyle.primary, custom_id=f"shards:manual:{message.id}"
             )
             retry_btn = discord.ui.Button(
-                label="Retry OCR",
-                style=discord.ButtonStyle.secondary,
-                custom_id=f"shards:retry:{message.id}"
+                label="Retry OCR", style=discord.ButtonStyle.secondary, custom_id=f"shards:retry:{message.id}"
             )
             close_btn = discord.ui.Button(
-                label="Close",
-                style=discord.ButtonStyle.danger,
-                custom_id=f"shards:close:{message.id}"
+                label="Close", style=discord.ButtonStyle.danger, custom_id=f"shards:close:{message.id}"
             )
 
             async def _use_counts(i2: discord.Interaction):
@@ -231,7 +217,6 @@ class ShardsCog(commands.Cog):
                     await modal.wait()
                 except Exception:
                     pass
-                parsed = {}
                 try:
                     parsed = modal.parse_counts()
                 except Exception:
@@ -242,7 +227,9 @@ class ShardsCog(commands.Cog):
                     return
 
                 clan_tag = self._clan_tag_for_thread(message.channel.id) or ""
-                SA.append_snapshot(message.author.id, message.author.display_name, clan_tag, parsed, "manual", message.jump_url)
+                SA.append_snapshot(
+                    message.author.id, message.author.display_name, clan_tag, parsed, "manual", message.jump_url
+                )
                 await self._refresh_summary_for_clan(clan_tag)
                 await i2.followup.send("Counts saved. Summary updated.", ephemeral=True)
 
@@ -256,7 +243,6 @@ class ShardsCog(commands.Cog):
                     await modal.wait()
                 except Exception:
                     pass
-                parsed = {}
                 try:
                     parsed = modal.parse_counts()
                 except Exception:
@@ -267,7 +253,9 @@ class ShardsCog(commands.Cog):
                     return
 
                 clan_tag = self._clan_tag_for_thread(message.channel.id) or ""
-                SA.append_snapshot(message.author.id, message.author.display_name, clan_tag, parsed, "manual", message.jump_url)
+                SA.append_snapshot(
+                    message.author.id, message.author.display_name, clan_tag, parsed, "manual", message.jump_url
+                )
                 await self._refresh_summary_for_clan(clan_tag)
                 await i2.followup.send("Counts saved. Summary updated.", ephemeral=True)
 
@@ -278,8 +266,6 @@ class ShardsCog(commands.Cog):
                 # Bust cache and rescan
                 self._ocr_cache.pop(cache_key, None)
                 new_counts = await self._ocr_prefill_from_attachment(images[0])
-                for st in ShardType:
-                    new_counts.setdefault(st, 0)
                 self._ocr_cache[cache_key] = new_counts
                 new_preview = self._fmt_counts_line(new_counts)
                 try:
@@ -306,17 +292,16 @@ class ShardsCog(commands.Cog):
             eview.add_item(retry_btn)
             eview.add_item(close_btn)
 
-            # Send the ephemeral preview
             try:
                 ep_msg = await inter.followup.send(f"**OCR Preview**\n{preview}", view=eview, ephemeral=True)
-                # Keep the ephemeral view referenced so button callbacks stay alive
                 self._live_views[getattr(ep_msg, "id", 0) or 0] = eview
             except Exception:
                 pass
 
         async def _dismiss_callback(inter: discord.Interaction):
-            # Only author or staff can dismiss the prompt message
-            if inter.user.id != message.author.id and not _has_any_role(inter.user, getattr(self.cfg, "roles_staff_override", [])):
+            if inter.user.id != message.author.id and not _has_any_role(
+                inter.user, getattr(self.cfg, "roles_staff_override", [])
+            ):
                 try:
                     await inter.response.send_message("Only the image author or staff can dismiss this.", ephemeral=True)
                 except Exception:
@@ -370,7 +355,7 @@ class ShardsCog(commands.Cog):
                 f"Tesseract: **{info.get('tesseract_version','?')}** | "
                 f"pytesseract: **{info.get('pytesseract_version','?')}** | "
                 f"Pillow: **{info.get('pillow_version','?')}**",
-                mention_author=False
+                mention_author=False,
             )
             return
 
@@ -381,7 +366,7 @@ class ShardsCog(commands.Cog):
             status = "PASS ✅" if ok else "FAIL ❌"
             await ctx.reply(
                 f"OCR self-test: **{status}** in **{ms} ms**. Read: `{text or '∅'}` (expected `12345`).",
-                mention_author=False
+                mention_author=False,
             )
             return
 
@@ -438,7 +423,6 @@ class ShardsCog(commands.Cog):
                 await modal.wait()
             except Exception:
                 pass
-            counts = {}
             try:
                 counts = modal.parse_counts()
             except Exception:
@@ -493,25 +477,29 @@ class ShardsCog(commands.Cog):
 
         # Mystery: inventory-only event
         if shard == ShardType.MYSTERY:
-            SA.append_events([{
-                "ts_utc": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "actor_discord_id": str(ctx.author.id),
-                "target_discord_id": str(ctx.author.id),
-                "clan_tag": self._clan_tag_for_thread(ctx.channel.id) or "",
-                "type": "pull",
-                "shard_type": shard.value,
-                "rarity": "",
-                "qty": N,
-                "note": "batch",
-                "origin": "command",
-                "message_link": ctx.message.jump_url,
-                "guaranteed_flag": False,
-                "extra_legendary_flag": False,
-                "batch_id": f"b{ctx.message.id}",
-                "batch_size": N,
-                "index_in_batch": "",
-                "resets_pity": False,
-            }])
+            SA.append_events(
+                [
+                    {
+                        "ts_utc": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "actor_discord_id": str(ctx.author.id),
+                        "target_discord_id": str(ctx.author.id),
+                        "clan_tag": self._clan_tag_for_thread(ctx.channel.id) or "",
+                        "type": "pull",
+                        "shard_type": shard.value,
+                        "rarity": "",
+                        "qty": N,
+                        "note": "batch",
+                        "origin": "command",
+                        "message_link": ctx.message.jump_url,
+                        "guaranteed_flag": False,
+                        "extra_legendary_flag": False,
+                        "batch_id": f"b{ctx.message.id}",
+                        "batch_size": N,
+                        "index_in_batch": "",
+                        "resets_pity": False,
+                    }
+                ]
+            )
             await self._refresh_summary_for_clan(self._clan_tag_for_thread(ctx.channel.id))
             await ctx.reply("Pulls recorded. Summary updated.")
             return
@@ -519,7 +507,6 @@ class ShardsCog(commands.Cog):
         # Step 3: rarities (batch-aware)
         rar_modal = AddPullsRarities(shard, N)
 
-        # open a small button to trigger modal from a prefix command
         v = discord.ui.View(timeout=60)
         open_btn = discord.ui.Button(label="Open rarity form", style=discord.ButtonStyle.primary)
 
@@ -549,45 +536,96 @@ class ShardsCog(commands.Cog):
             "batch_id": batch_id,
             "batch_size": N,
         }
-        # aggregate pull row
-        rows.append({**base, "type": "pull", "rarity": "", "qty": N,
-                     "note": "batch", "guaranteed_flag": False, "extra_legendary_flag": False,
-                     "index_in_batch": "", "resets_pity": False})
+        rows.append(
+            {
+                **base,
+                "type": "pull",
+                "rarity": "",
+                "qty": N,
+                "note": "batch",
+                "guaranteed_flag": False,
+                "extra_legendary_flag": False,
+                "index_in_batch": "",
+                "resets_pity": False,
+            }
+        )
 
         guar = bool(data.get("guaranteed", False))
         extra = bool(data.get("extra", False))
 
         if shard in (ShardType.ANCIENT, ShardType.VOID):
             if data.get("epic", False):
-                rows.append({**base, "type": "epic", "rarity": "epic", "qty": 1, "note": "",
-                             "guaranteed_flag": False, "extra_legendary_flag": False,
-                             "index_in_batch": N - int(data.get("epic_left", 0)), "resets_pity": True})
+                rows.append(
+                    {
+                        **base,
+                        "type": "epic",
+                        "rarity": "epic",
+                        "qty": 1,
+                        "note": "",
+                        "guaranteed_flag": False,
+                        "extra_legendary_flag": False,
+                        "index_in_batch": N - int(data.get("epic_left", 0)),
+                        "resets_pity": True,
+                    }
+                )
             if data.get("legendary", False):
-                rows.append({**base, "type": "legendary", "rarity": "legendary", "qty": 1,
-                             "note": "guaranteed" if guar else ("extra" if extra else ""),
-                             "guaranteed_flag": guar, "extra_legendary_flag": extra,
-                             "index_in_batch": N - int(data.get("legendary_left", 0)),
-                             "resets_pity": not (guar or extra)})
+                rows.append(
+                    {
+                        **base,
+                        "type": "legendary",
+                        "rarity": "legendary",
+                        "qty": 1,
+                        "note": "guaranteed" if guar else ("extra" if extra else ""),
+                        "guaranteed_flag": guar,
+                        "extra_legendary_flag": extra,
+                        "index_in_batch": N - int(data.get("legendary_left", 0)),
+                        "resets_pity": not (guar or extra),
+                    }
+                )
         elif shard == ShardType.SACRED:
             if data.get("legendary", False):
-                rows.append({**base, "type": "legendary", "rarity": "legendary", "qty": 1,
-                             "note": "guaranteed" if guar else ("extra" if extra else ""),
-                             "guaranteed_flag": guar, "extra_legendary_flag": extra,
-                             "index_in_batch": N - int(data.get("legendary_left", 0)),
-                             "resets_pity": not (guar or extra)})
+                rows.append(
+                    {
+                        **base,
+                        "type": "legendary",
+                        "rarity": "legendary",
+                        "qty": 1,
+                        "note": "guaranteed" if guar else ("extra" if extra else ""),
+                        "guaranteed_flag": guar,
+                        "extra_legendary_flag": extra,
+                        "index_in_batch": N - int(data.get("legendary_left", 0)),
+                        "resets_pity": not (guar or extra),
+                    }
+                )
         elif shard == ShardType.PRIMAL:
             if data.get("legendary", False):
-                rows.append({**base, "type": "legendary", "rarity": "legendary", "qty": 1,
-                             "note": "guaranteed" if guar else ("extra" if extra else ""),
-                             "guaranteed_flag": guar, "extra_legendary_flag": extra,
-                             "index_in_batch": N - int(data.get("legendary_left", 0)),
-                             "resets_pity": not (guar or extra)})
+                rows.append(
+                    {
+                        **base,
+                        "type": "legendary",
+                        "rarity": "legendary",
+                        "qty": 1,
+                        "note": "guaranteed" if guar else ("extra" if extra else ""),
+                        "guaranteed_flag": guar,
+                        "extra_legendary_flag": extra,
+                        "index_in_batch": N - int(data.get("legendary_left", 0)),
+                        "resets_pity": not (guar or extra),
+                    }
+                )
             if data.get("mythical", False):
-                rows.append({**base, "type": "mythical", "rarity": "mythical", "qty": 1,
-                             "note": "guaranteed" if guar else ("extra" if extra else ""),
-                             "guaranteed_flag": guar, "extra_legendary_flag": extra,
-                             "index_in_batch": N - int(data.get("mythical_left", 0)),
-                             "resets_pity": not (guar or extra)})
+                rows.append(
+                    {
+                        **base,
+                        "type": "mythical",
+                        "rarity": "mythical",
+                        "qty": 1,
+                        "note": "guaranteed" if guar else ("extra" if extra else ""),
+                        "guaranteed_flag": guar,
+                        "extra_legendary_flag": extra,
+                        "index_in_batch": N - int(data.get("mythical_left", 0)),
+                        "resets_pity": not (guar or extra),
+                    }
+                )
 
         SA.append_events(rows)
         await self._refresh_summary_for_clan(self._clan_tag_for_thread(ctx.channel.id))
@@ -601,7 +639,7 @@ class ShardsCog(commands.Cog):
         if not cc:
             return
 
-        # TODO: fetch real state from Sheets; placeholders keep the scaffold running
+        # TODO: plug in real Sheets aggregation when ready
         participants = 0
         totals = {st: 0 for st in DISPLAY_ORDER}
         page_index = 0
