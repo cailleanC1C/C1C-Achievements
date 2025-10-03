@@ -12,7 +12,7 @@ from .constants import ShardType, Rarity, DISPLAY_ORDER
 from . import sheets_adapter as SA
 from .views import SetCountsModal, AddPullsStart, AddPullsCount, AddPullsRarities
 from .renderer import build_summary_embed
-from .ocr import extract_counts_from_image_bytes, ocr_runtime_info, ocr_smoke_test
+from .ocr import extract_counts_from_image_bytes, extract_counts_with_debug
 
 UTC = timezone.utc
 log = logging.getLogger("c1c-claims")
@@ -128,6 +128,30 @@ class ShardsCog(commands.Cog):
         images = [a for a in message.attachments if _is_image_attachment(a)]
         if not images:
             return
+        # --- DEBUG OCR: run in background and post ROI images only if OCR finds all zeros ---
+        async def _ocr_debug_background():
+            try:
+                if not images:
+                    return
+                data = await images[0].read()
+                counts, dbg_imgs = extract_counts_with_debug(data)
+                # only post debug images if everything read as zero to avoid noise
+                if sum(counts.values()) == 0 and dbg_imgs:
+                    import io as _io
+                    files = [
+                        discord.File(_io.BytesIO(b), filename=name)
+                        for name, b in dbg_imgs
+                    ]
+                    await message.channel.send(
+                        content="(OCR debug) Left-rail ROI I’m reading (grayscale + binarized). "
+                                "If this looks wrong, we’ll tweak crop/threshold.",
+                        files=files
+                    )
+            except Exception:
+                # swallow errors; this is debug-only
+                pass
+
+        asyncio.create_task(_ocr_debug_background())
 
         # Post a simple public prompt with two buttons
         view = discord.ui.View(timeout=300)
