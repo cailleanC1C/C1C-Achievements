@@ -29,10 +29,11 @@ _LABEL_TO_ST: Dict[str, ShardType] = {
 
 def _label_key(raw: str) -> Optional[str]:
     cleaned = re.sub(r"[^a-z]", "", (raw or "").lower())
+    for suffix in ("shards", "shard"):
+        if cleaned.endswith(suffix):
+            cleaned = cleaned[: -len(suffix)]
+            break
     cleaned = cleaned.rstrip("s")
-    if cleaned.endswith("shard"):
-        cleaned = cleaned[:-5]
-        cleaned = cleaned.rstrip("s")
     return cleaned if cleaned in _LABEL_TO_ST else None
 
 
