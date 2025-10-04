@@ -72,7 +72,7 @@ def extract_counts_from_image_bytes(data: bytes) -> Dict[ShardType, int]:
     """
     Number-only OCR:
       1) Crop the *left rail* of the screenshot (no word labels).
-      2) Grayscale → autocontrast → unsharp → binarize (both polarities).
+      2) Grayscale → autocontrast → unsharp → binarize (and also try inverted).
       3) OCR only digits and separators with short timeouts.
       4) Split ROI vertically into 5 equal bands (Myst, Anc, Void, Pri, Sac).
       5) For each band, choose best numeric token (highest conf) near the left.
@@ -118,10 +118,14 @@ def extract_counts_with_debug(
 ) -> Tuple[Dict[ShardType, int], List[Tuple[str, bytes]]]:
     """
     Same as extract_counts_from_image_bytes, but also returns debug images:
-    [("roi_gray.png", ...), ("roi_white_on_black.png", ...), ("roi_black_on_white.png", ...)]
+    [("roi_gray.png", ...), ("roi_bin.png", ...), ("roi_bin_inv.png", ...)]
     Only the first ratio is exported as debug imagery.
+
+    If Tesseract is missing, this still returns debug images so you can see
+    exactly what the OCR *would* read.
     """
-    if pytesseract is None or Image is None or ImageOps is None:
+    # We can still produce debug imagery without Tesseract
+    if Image is None or ImageOps is None:
         return ({}, [])
 
     try:
@@ -140,11 +144,14 @@ def extract_counts_with_debug(
         dbg: List[Tuple[str, bytes]] = []
         dbg.append(("roi_gray.png", _img_to_png_bytes(gray0)))
         dbg.append(("roi_bin.png", _img_to_png_bytes(bin0)))
-        # also show the inverted binary that we now try during OCR
         try:
             dbg.append(("roi_bin_inv.png", _img_to_png_bytes(ImageOps.invert(bin0))))
         except Exception:
             pass
+
+        # If tesseract is not available, return debug only
+        if pytesseract is None:
+            return ({}, dbg)
 
         # Choose the best among all ratios
         best_counts: Dict[ShardType, int] = {}
@@ -182,19 +189,16 @@ def _left_rail_crop(img: "Image.Image", ratio: float) -> "Image.Image":
     return img.crop((0, 0, x2, H))
 
 
-def _preprocess_roi_dual(roi: "Image.Image") -> Tuple["Image.Image", "Image.Image", "Image.Image"]:
+def _preprocess_roi(roi: "Image.Image") -> Tuple["Image.Image", "Image.Image"]:
     """
-    Return (gray_autocontrast, bin_white_on_black, bin_black_on_white) images for OCR.
-    We try both polarities because Raid's UI digits are white on dark.
+    Return (gray_autocontrast, binarized) images for OCR.
     """
     gray = ImageOps.grayscale(roi)
     gray = ImageOps.autocontrast(gray)
     gray = gray.filter(ImageFilter.UnsharpMask(radius=1.0, percent=120, threshold=3))
-
-    # Threshold tuned for Raid UI; try both polarities
-    bin_white_on_black = gray.point(lambda p: 255 if p > 160 else 0)  # current style (white digits)
-    bin_black_on_white = gray.point(lambda p: 0 if p > 160 else 255)  # inverted (black digits)
-    return gray, bin_white_on_black, bin_black_on_white
+    # A fixed threshold works well for Raid UI; tweak if needed
+    bin_img = gray.point(lambda p: 255 if p > 160 else 0)
+    return gray, bin_img
 
 
 def _normalize_digits(s: str) -> str:
@@ -208,30 +212,26 @@ def _parse_num_token(raw: str) -> int:
     return int(t) if t.isdigit() else 0
 
 
-def _tesseract_data(img: "Image.Image", psm: int, timeout_sec: int):
-    cfg = (
-        f"--oem 3 --psm {psm} "
-        "-c tessedit_char_whitelist=0123456789., "
-        "-c preserve_interword_spaces=1 "
-        "-c classify_bln_numeric_mode=1"
-    )
-    return pytesseract.image_to_data(img, output_type=Output.DICT, config=cfg, timeout=timeout_sec)
-
-def _read_counts_from_roi(roi, timeout_sec: int = 8) -> Tuple[Dict[ShardType, int], int]:
+def _read_counts_from_roi(roi, timeout_sec: int = 6) -> Tuple[Dict[ShardType, int], int]:
     """
-    OCR the ROI and split vertically into 5 bands. We now try multiple OCR passes:
+    OCR the ROI and split vertically into 5 bands. We try multiple OCR passes:
     binary → inverted-binary → gray; and two configs (PSM 11 then PSM 6).
     Returns (counts, score) where score = number of bands with nonzero readings.
     """
+    if pytesseract is None or Output is None:
+        return ({st: 0 for st in (
+            ShardType.MYSTERY, ShardType.ANCIENT, ShardType.VOID, ShardType.PRIMAL, ShardType.SACRED
+        )}, 0)
+
     gray, bin_img = _preprocess_roi(roi)
 
     # candidate images to try
-    candidates = [("bin", bin_img)]
+    candidates: List["Image.Image"] = [bin_img]
     try:
-        candidates.append(("inv", ImageOps.invert(bin_img)))
+        candidates.append(ImageOps.invert(bin_img))
     except Exception:
         pass
-    candidates.append(("gray", gray))
+    candidates.append(gray)
 
     # OCR configs to try (prefer sparse text)
     cfgs = [
@@ -241,10 +241,10 @@ def _read_counts_from_roi(roi, timeout_sec: int = 8) -> Tuple[Dict[ShardType, in
 
     # gather tokens across passes
     tokens: List[Tuple[int, int, float, str]] = []  # (cx, cy, conf, text)
-    W, H = bin_img.size  # any candidate will have same size as roi
+    W, H = bin_img.size  # candidates share size
     max_x = int(W * 0.60)  # keep away from right-side counters like 238/270
 
-    for _, img in candidates:
+    for img in candidates:
         for cfg in cfgs:
             try:
                 dd = pytesseract.image_to_data(
@@ -266,7 +266,7 @@ def _read_counts_from_roi(roi, timeout_sec: int = 8) -> Tuple[Dict[ShardType, in
                     conf = float(dd["conf"][i])
                 except Exception:
                     conf = -1.0
-                if conf < 10:  # slightly more permissive; we’ll re-rank later
+                if conf < 10:  # slightly permissive; we’ll re-rank per band
                     continue
                 x = int(dd["left"][i]); y = int(dd["top"][i])
                 w = int(dd["width"][i]); h = int(dd["height"][i])
@@ -279,7 +279,7 @@ def _read_counts_from_roi(roi, timeout_sec: int = 8) -> Tuple[Dict[ShardType, in
         if len(tokens) >= 5:
             break
 
-    # Split ROI into 5 vertical bands, pick best token per band by confidence then by length
+    # Split ROI into 5 vertical bands, pick best token per band
     counts_by_band: List[int] = []
     band_h = H / 5.0
     for band in range(5):
@@ -300,6 +300,7 @@ def _read_counts_from_roi(roi, timeout_sec: int = 8) -> Tuple[Dict[ShardType, in
 
     score = sum(1 for v in counts_by_band if v > 0)
     return counts, score
+
 
 def _img_to_png_bytes(img: "Image.Image") -> bytes:
     buf = io.BytesIO()
