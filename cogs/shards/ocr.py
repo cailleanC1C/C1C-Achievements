@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import os
 import re
 from typing import Dict, List, Tuple
 
@@ -20,7 +21,14 @@ except Exception:  # pragma: no cover
 
 from .constants import ShardType
 
-# Accept "3,584" / "3.584" / "3 584"
+# ---------------------------
+# Tunables
+# ---------------------------
+# Hard cap the Tesseract run; can be overridden via env.
+_OCR_TIMEOUT_SEC = int(os.getenv("OCR_TIMEOUT_SEC", "8"))
+# Try a few left-rail widths; we pick the variant with most non-zero bands.
+_ROI_RATIOS: Tuple[float, ...] = (0.40, 0.44, 0.36)
+# Accept "3,584" / "3.584" / "3 584" / "3584"
 _NUM_RE = re.compile(r"^\d{1,5}(?:[.,\s]\d{3})*$")
 
 
@@ -58,7 +66,12 @@ def ocr_smoke_test() -> Tuple[bool, str]:
         img = Image.new("L", (200, 60), color=255)
         d = ImageDraw.Draw(img)
         d.text((10, 10), "12345", fill=0)
-        txt = pytesseract.image_to_string(img, config="--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789")
+        cfg = "--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789"
+        try:
+            txt = pytesseract.image_to_string(img, config=cfg, timeout=_OCR_TIMEOUT_SEC)
+        except TypeError:
+            # Older pytesseract without timeout kw
+            txt = pytesseract.image_to_string(img, config=cfg)
         txt = (txt or "").strip()
         return ("12345" in txt, txt)
     except Exception:
@@ -87,16 +100,14 @@ def extract_counts_from_image_bytes(data: bytes) -> Dict[ShardType, int]:
         if scale != 1.0:
             base = base.resize((int(base.width * scale), int(base.height * scale)))
 
-        # Try a couple of crop widths; pick the one that yields the most non-zero bands
-        ratios = (0.38, 0.42, 0.46)
         best_counts: Dict[ShardType, int] = {}
         best_score = -1
 
-        for r in ratios:
+        for r in _ROI_RATIOS:
             roi = _left_rail_crop(base, r)
-            counts, _score = _read_counts_from_roi(roi, timeout_sec=8)
-            if _score > best_score:
-                best_counts, best_score = counts, _score
+            counts, score = _read_counts_from_roi(roi, timeout_sec=_OCR_TIMEOUT_SEC)
+            if score > best_score:
+                best_counts, best_score = counts, score
 
         # Ensure all shard keys exist
         for st in ShardType:
@@ -111,7 +122,7 @@ def extract_counts_from_image_bytes(data: bytes) -> Dict[ShardType, int]:
 
 
 def extract_counts_with_debug(
-    data: bytes, timeout_sec: int = 8
+    data: bytes, timeout_sec: int = _OCR_TIMEOUT_SEC
 ) -> Tuple[Dict[ShardType, int], List[Tuple[str, bytes]]]:
     """
     Same as extract_counts_from_image_bytes, but also returns a list of debug images:
@@ -129,14 +140,15 @@ def extract_counts_with_debug(
         if scale != 1.0:
             base = base.resize((int(base.width * scale), int(base.height * scale)))
 
-        ratios = (0.42, 0.38, 0.46)
+        ratios = _ROI_RATIOS
 
         # Build debug for the first ratio
         roi0 = _left_rail_crop(base, ratios[0])
         gray0, bin0 = _preprocess_roi(roi0)
-        dbg: List[Tuple[str, bytes]] = []
-        dbg.append(("roi_gray.png", _img_to_png_bytes(gray0)))
-        dbg.append(("roi_bin.png", _img_to_png_bytes(bin0)))
+        dbg: List[Tuple[str, bytes]] = [
+            ("roi_gray.png", _img_to_png_bytes(gray0)),
+            ("roi_bin.png", _img_to_png_bytes(bin0)),
+        ]
 
         # Choose the best among all ratios
         best_counts: Dict[ShardType, int] = {}
@@ -197,7 +209,26 @@ def _parse_num_token(raw: str) -> int:
     return int(t) if t.isdigit() else 0
 
 
-def _read_counts_from_roi(roi, timeout_sec: int = 8) -> Tuple[Dict[ShardType, int], int]:
+def _safe_image_to_data(img: "Image.Image", config: str, timeout: int) -> Dict[str, List]:
+    """
+    Call pytesseract.image_to_data with a timeout when supported; fall back otherwise.
+    Never raises; returns a dict with at least an empty 'text' list on failure.
+    """
+    if pytesseract is None or Output is None:
+        return {"text": []}
+    try:
+        return pytesseract.image_to_data(img, output_type=Output.DICT, config=config, timeout=timeout)  # type: ignore
+    except TypeError:
+        # Older pytesseract without 'timeout' kw
+        try:
+            return pytesseract.image_to_data(img, output_type=Output.DICT, config=config)  # type: ignore
+        except Exception:
+            return {"text": []}
+    except Exception:
+        return {"text": []}
+
+
+def _read_counts_from_roi(roi: "Image.Image", timeout_sec: int = _OCR_TIMEOUT_SEC) -> Tuple[Dict[ShardType, int], int]:
     """
     OCR the ROI and split vertically into 5 bands. For each band, pick the best numeric token.
     Returns (counts, score) where score = number of bands with nonzero readings.
@@ -210,15 +241,16 @@ def _read_counts_from_roi(roi, timeout_sec: int = 8) -> Tuple[Dict[ShardType, in
         "-c preserve_interword_spaces=1 "
         "-c classify_bln_numeric_mode=1"
     )
-    dd = pytesseract.image_to_data(bin_img, output_type=Output.DICT, config=cfg, timeout=timeout_sec)
+    dd = _safe_image_to_data(bin_img, cfg, timeout=timeout_sec)
 
     W, H = bin_img.size
     # Prefer tokens close to the left half of ROI (avoid mid-screen counters like 238/270)
     max_x = int(W * 0.60)
 
     tokens: List[Tuple[int, int, float, str]] = []  # (cx, cy, conf, text)
-    for i in range(len(dd.get("text", []))):
-        raw = (dd["text"][i] or "").strip()
+    texts = dd.get("text", [])
+    for i in range(len(texts)):
+        raw = (texts[i] or "").strip()
         if not raw:
             continue
         txt = _normalize_digits(raw).replace("\u00A0", " ")
