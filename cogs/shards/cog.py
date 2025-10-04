@@ -1,4 +1,3 @@
-# cogs/shards/cog.py
 from __future__ import annotations
 
 import asyncio
@@ -23,6 +22,7 @@ from .ocr import (
 
 UTC = timezone.utc
 log = logging.getLogger("c1c-claims")
+
 
 def _has_any_role(member: discord.Member, role_ids: List[int]) -> bool:
     rids = {r.id for r in member.roles}
@@ -97,16 +97,16 @@ class ShardsCog(commands.Cog):
         fallback = {
             ShardType.MYSTERY: "🟩Myst",
             ShardType.ANCIENT: "🟦Anc",
-            ShardType.VOID: "🟪Void",
-            ShardType.PRIMAL: "🟥Pri",
-            ShardType.SACRED: "🟨Sac",
+            ShardType.VOID:    "🟪Void",
+            ShardType.PRIMAL:  "🟥Pri",
+            ShardType.SACRED:  "🟨Sac",
         }
         key_map = {
             ShardType.MYSTERY: ("Myst", "Mystery"),
             ShardType.ANCIENT: ("Anc", "Ancient"),
-            ShardType.VOID: ("Void",),
-            ShardType.PRIMAL: ("Pri", "Primal"),
-            ShardType.SACRED: ("Sac", "Sacred"),
+            ShardType.VOID:    ("Void",),
+            ShardType.PRIMAL:  ("Pri", "Primal"),
+            ShardType.SACRED:  ("Sac", "Sacred"),
         }
         for k in key_map.get(st, ()):
             val = emap.get(k)
@@ -262,14 +262,19 @@ class ShardsCog(commands.Cog):
                 if i2.user.id != inter.user.id:
                     await i2.response.send_message("Not your panel.", ephemeral=True)
                     return
-                # Bust cache and rescan
+                # Defer first, then heavy work off-thread, then edit original ephemeral message
+                try:
+                    await i2.response.defer(ephemeral=True, thinking=True)
+                except Exception:
+                    pass
                 self._ocr_cache.pop(cache_key, None)
                 new_counts = await self._ocr_prefill_from_attachment(images[0])
                 self._ocr_cache[cache_key] = new_counts
                 new_preview = self._fmt_counts_line(new_counts)
                 try:
-                    await i2.response.edit_message(content=f"**OCR Preview**\n{new_preview}", view=eview)
-                except discord.InteractionResponded:
+                    await i2.edit_original_response(content=f"**OCR Preview**\n{new_preview}", view=eview)
+                except Exception:
+                    # Fallback: send a fresh ephemeral message
                     await i2.followup.send(f"**OCR Preview**\n{new_preview}", ephemeral=True)
 
             async def _close(i2: discord.Interaction):
@@ -277,7 +282,11 @@ class ShardsCog(commands.Cog):
                     await i2.response.send_message("Not your panel.", ephemeral=True)
                     return
                 try:
-                    await i2.response.edit_message(content="Closed.", view=None)
+                    await i2.response.defer(ephemeral=True)
+                except Exception:
+                    pass
+                try:
+                    await i2.edit_original_response(content="Closed.", view=None)
                 except Exception:
                     pass
 
@@ -293,6 +302,7 @@ class ShardsCog(commands.Cog):
 
             try:
                 ep_msg = await inter.followup.send(f"**OCR Preview**\n{preview}", view=eview, ephemeral=True)
+                # Keep a reference so callbacks remain alive
                 self._live_views[getattr(ep_msg, "id", 0) or 0] = eview
             except Exception:
                 pass
