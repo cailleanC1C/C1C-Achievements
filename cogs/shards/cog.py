@@ -82,8 +82,8 @@ class ShardsCog(commands.Cog):
     async def _ocr_prefill_from_attachment(self, att: discord.Attachment) -> Dict[ShardType, int]:
         try:
             data = await att.read()
-            counts = extract_counts_from_image_bytes(data) or {}
-            # normalize missing keys
+            counts = await asyncio.to_thread(extract_counts_from_image_bytes, data) or {}
+            # normalize missing keys so the preview always has all five
             for st in ShardType:
                 counts.setdefault(st, 0)
             return counts
@@ -143,7 +143,7 @@ class ShardsCog(commands.Cog):
         async def _ocr_debug_background():
             try:
                 data = await images[0].read()
-                counts, dbg_imgs = extract_counts_with_debug(data)
+                counts, dbg_imgs = await asyncio.to_thread(extract_counts_with_debug, data, 8)
                 if sum(counts.values()) == 0 and dbg_imgs:
                     import io as _io
                     files = [discord.File(_io.BytesIO(b), filename=name) for name, b in dbg_imgs]
