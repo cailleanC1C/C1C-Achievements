@@ -91,7 +91,7 @@ def extract_counts_from_image_bytes(data: bytes) -> Dict[ShardType, int]:
             base = base.resize((int(base.width * scale), int(base.height * scale)))
 
         # Try a few crop widths; pick the one that yields the most non-zero bands
-        ratios = (0.38, 0.36, 0.46)
+        ratios = (0.38, 0.42, 0.46)
         best_counts: Dict[ShardType, int] = {}
         best_score = -1
 
@@ -132,7 +132,7 @@ def extract_counts_with_debug(
         if scale != 1.0:
             base = base.resize((int(base.width * scale), int(base.height * scale)))
 
-        ratios = (0.42, 0.36, 0.46)
+        ratios = (0.38, 0.42, 0.46)
 
         # Build debug for the first ratio
         roi0 = _left_rail_crop(base, ratios[0])
