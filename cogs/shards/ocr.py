@@ -91,7 +91,7 @@ def extract_counts_from_image_bytes(data: bytes) -> Dict[ShardType, int]:
             base = base.resize((int(base.width * scale), int(base.height * scale)))
 
         # Try a few crop widths; pick the one that yields the most non-zero bands
-        ratios = (0.36, 0.40, 0.44)
+        ratios = (0.38, 0.36, 0.46)
         best_counts: Dict[ShardType, int] = {}
         best_score = -1
 
@@ -132,7 +132,7 @@ def extract_counts_with_debug(
         if scale != 1.0:
             base = base.resize((int(base.width * scale), int(base.height * scale)))
 
-        ratios = (0.40, 0.36, 0.44)
+        ratios = (0.42, 0.36, 0.46)
 
         # Build debug for the first ratio
         roi0 = _left_rail_crop(base, ratios[0])
@@ -190,8 +190,9 @@ def _preprocess_roi(roi: "Image.Image") -> Tuple["Image.Image", "Image.Image"]:
     gray = gray.filter(ImageFilter.UnsharpMask(radius=1.0, percent=120, threshold=3))
     # A fixed threshold works well for Raid UI; tweak if needed
     bin_img = gray.point(lambda p: 255 if p > 160 else 0)
+    # Thicken thin strokes a touch; improves small numerals like 3/1.
+    bin_img = bin_img.filter(ImageFilter.MaxFilter(3))
     return gray, bin_img
-
 
 def _normalize_digits(s: str) -> str:
     # Fix common OCR slips: l/İ/I → 1, O/º → 0
@@ -202,7 +203,6 @@ def _normalize_digits(s: str) -> str:
 def _parse_num_token(raw: str) -> int:
     t = _normalize_digits(raw).replace(",", "").replace(".", "").replace(" ", "")
     return int(t) if t.isdigit() else 0
-
 
 def _read_counts_from_roi(roi, timeout_sec: int = 6) -> Tuple[Dict[ShardType, int], int]:
     """
@@ -222,14 +222,14 @@ def _read_counts_from_roi(roi, timeout_sec: int = 6) -> Tuple[Dict[ShardType, in
 
     # OCR configs to try (prefer sparse text first)
     cfgs = [
-        "--oem 1 --psm 11 -c tessedit_char_whitelist=0123456789., -c preserve_interword_spaces=1 -c classify_bln_numeric_mode=1",
-        "--oem 1 --psm 6  -c tessedit_char_whitelist=0123456789., -c preserve_interword_spaces=1 -c classify_bln_numeric_mode=1",
+        "--oem 3 --psm 6  -c tessedit_char_whitelist=0123456789., -c preserve_interword_spaces=1 -c classify_bln_numeric_mode=1",
+        "--oem 3 --psm 11 -c tessedit_char_whitelist=0123456789., -c preserve_interword_spaces=1 -c classify_bln_numeric_mode=1",
     ]
 
     tokens: List[Tuple[int, int, float, str]] = []  # (cx, cy, conf, text)
     W, H = bin_img.size
-    # Be strict: we only want numbers from the left icon/stack, not mid-screen counters.
-    left_frac = 0.35
+    # Accept up to ~60% of the left rail; still rejects mid-screen counters (e.g., 238/270).
+    left_frac = 0.60
     max_x = int(W * left_frac)
 
     for img in candidates:
@@ -253,15 +253,12 @@ def _read_counts_from_roi(roi, timeout_sec: int = 6) -> Tuple[Dict[ShardType, in
                     conf = float(dd["conf"][i])
                 except Exception:
                     conf = -1.0
-                if conf < 10:
+                if conf < 18:
                     continue
                 x = int(dd["left"][i]); y = int(dd["top"][i])
                 w = int(dd["width"][i]); h = int(dd["height"][i])
                 cx = x + w // 2; cy = y + h // 2
                 if cx > max_x:
-                    continue
-                # light sanity on size
-                if h < 10 or h > int(H * 0.35):
                     continue
                 tokens.append((cx, cy, conf, txt))
 
