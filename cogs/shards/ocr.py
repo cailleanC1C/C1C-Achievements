@@ -204,6 +204,51 @@ def _parse_num_token(raw: str) -> int:
     t = _normalize_digits(raw).replace(",", "").replace(".", "").replace(" ", "")
     return int(t) if t.isdigit() else 0
 
+def _score_band_token(txt: str, conf: float) -> Tuple[int, float]:
+    """Return a comparable score tuple for band-level OCR picks."""
+    cleaned = _normalize_digits(txt).replace(",", "").replace(".", "").replace(" ", "")
+    return (len(cleaned), conf)
+
+
+def _run_psm7_band_pass(
+    sub_img_bin: "Image.Image",
+    sub_img_gray: "Image.Image",
+    timeout_sec: int,
+) -> Tuple[str, float] | None:
+    """Run the tighter per-band OCR pass and return the best (text, conf)."""
+    picks: List[Tuple[str, float]] = []
+    for sub_img in (sub_img_bin, sub_img_gray):
+        try:
+            dd2 = pytesseract.image_to_data(
+                sub_img,
+                output_type=Output.DICT,
+                config="--oem 1 --psm 7 -c tessedit_char_whitelist=0123456789., -c classify_bln_numeric_mode=1",
+                timeout=max(2, timeout_sec // 2),
+            )
+        except Exception:
+            continue
+
+        m = len(dd2.get("text", []))
+        for j in range(m):
+            raw2 = (dd2["text"][j] or "").strip()
+            if not raw2:
+                continue
+            t2 = _normalize_digits(raw2)
+            if not (_NUM_RE.match(t2) or t2.isdigit()):
+                continue
+            try:
+                conf2 = float(dd2["conf"][j])
+            except Exception:
+                conf2 = -1.0
+            if conf2 >= 10:
+                picks.append((t2, conf2))
+
+    if not picks:
+        return None
+
+    return max(picks, key=lambda p: _score_band_token(p[0], p[1]))
+
+
 def _read_counts_from_roi(roi, timeout_sec: int = 6) -> Tuple[Dict[ShardType, int], int]:
     """
     OCR the ROI and split vertically into 5 bands. We try multiple OCR passes:
@@ -273,52 +318,30 @@ def _read_counts_from_roi(roi, timeout_sec: int = 6) -> Tuple[Dict[ShardType, in
         y0 = band * band_h
         y1 = (band + 1) * band_h
         cands = [(cx, cy, conf, txt) for (cx, cy, conf, txt) in tokens if (y0 <= cy < y1)]
-        if not cands:
-            # Fallback: micro-ocr on a narrow band slice on the far left
-            bx0, bx1 = 0, max_x
-            by0 = int(y0 + band_h * 0.15)
-            by1 = int(y0 + band_h * 0.85)
-            try:
-                sub = roi.crop((bx0, by0, bx1, by1))
-                sub_gray, sub_bin = _preprocess_roi(sub)
-                # try bin first then gray with a tighter PSM 7 (single line-ish)
-                for sub_img in (sub_bin, sub_gray):
-                    try:
-                        dd2 = pytesseract.image_to_data(
-                            sub_img,
-                            output_type=Output.DICT,
-                            config="--oem 1 --psm 7 -c tessedit_char_whitelist=0123456789., -c classify_bln_numeric_mode=1",
-                            timeout=max(2, timeout_sec // 2),
-                        )
-                    except Exception:
-                        continue
-                    picks: List[Tuple[float, str]] = []
-                    m = len(dd2.get("text", []))
-                    for j in range(m):
-                        raw2 = (dd2["text"][j] or "").strip()
-                        if not raw2:
-                            continue
-                        t2 = _normalize_digits(raw2)
-                        if not (_NUM_RE.match(t2) or t2.isdigit()):
-                            continue
-                        try:
-                            conf2 = float(dd2["conf"][j])
-                        except Exception:
-                            conf2 = -1.0
-                        if conf2 >= 10:
-                            picks.append((conf2, t2))
-                    if picks:
-                        best_txt = max(picks, key=lambda p: (p[0], len(p[1])))[1]
-                        counts_by_band.append(_parse_num_token(best_txt))
-                        break
-                else:
-                    counts_by_band.append(0)
-            except Exception:
-                counts_by_band.append(0)
-            continue
+        main_pick: Tuple[str, float] | None = None
+        if cands:
+            best = max(cands, key=lambda t: _score_band_token(t[3], t[2]))
+            main_pick = (best[3], best[2])
 
-        best = max(cands, key=lambda t: (t[2], len(t[3])))
-        counts_by_band.append(_parse_num_token(best[3]))
+        micro_pick: Tuple[str, float] | None = None
+        bx0, bx1 = 0, max_x
+        by0 = int(y0 + band_h * 0.15)
+        by1 = int(y0 + band_h * 0.85)
+        try:
+            sub = roi.crop((bx0, by0, bx1, by1))
+            sub_gray, sub_bin = _preprocess_roi(sub)
+            micro_pick = _run_psm7_band_pass(sub_bin, sub_gray, timeout_sec)
+        except Exception:
+            micro_pick = None
+
+        best_pick = main_pick
+        if _score_band_token(*(micro_pick or ("", -1.0))) > _score_band_token(*(best_pick or ("", -1.0))):
+            best_pick = micro_pick
+
+        if best_pick is None:
+            counts_by_band.append(0)
+        else:
+            counts_by_band.append(_parse_num_token(best_pick[0]))
 
     # Map bands to shard types (top→bottom)
     order = [ShardType.MYSTERY, ShardType.ANCIENT, ShardType.VOID, ShardType.PRIMAL, ShardType.SACRED]
