@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import re
+from dataclasses import dataclass, replace
 from typing import Dict, List, Tuple
 
 # Importing here so the cog can still boot if OCR stack is missing.
@@ -22,6 +23,56 @@ from .constants import ShardType
 
 # Accept "3,584" / "3.584" / "3 584"
 _NUM_RE = re.compile(r"^\d{1,5}(?:[.,\s]\d{3})*$")
+
+_LABEL_TO_ST = {
+    "mystery": ShardType.MYSTERY,
+    "ancient": ShardType.ANCIENT,
+    "void": ShardType.VOID,
+    "primal": ShardType.PRIMAL,
+    "sacred": ShardType.SACRED,
+}
+
+
+def _label_key(label: str) -> str | None:
+    cleaned = re.sub(r"[^a-z]", "", label.lower())
+    for candidate in (cleaned, cleaned.rstrip("s")):
+        for key in _LABEL_TO_ST:
+            if candidate.startswith(key):
+                return key
+    return None
+
+
+@dataclass
+class _OcrToken:
+    left: int
+    top: int
+    width: int
+    height: int
+    conf: float
+    text: str
+
+    @property
+    def right(self) -> int:
+        return self.left + self.width
+
+    @property
+    def bottom(self) -> int:
+        return self.top + self.height
+
+    @property
+    def cx(self) -> int:
+        return self.left + self.width // 2
+
+    @property
+    def cy(self) -> int:
+        return self.top + self.height // 2
+
+
+def _rounded_token_key(tok: _OcrToken, step: int = 4) -> Tuple[int, int, int, int, str]:
+    def _r(v: int) -> int:
+        return int(round(v / step) * step)
+
+    return (_r(tok.left), _r(tok.top), _r(tok.width), _r(tok.height), tok.text)
 
 
 # ---------------------------
@@ -210,6 +261,48 @@ def _score_band_token(txt: str, conf: float) -> Tuple[int, float]:
     return (len(cleaned), conf)
 
 
+def _merge_band_tokens(tokens: List[_OcrToken]) -> List[_OcrToken]:
+    if not tokens:
+        return []
+
+    merged: List[_OcrToken] = []
+    for tok in sorted(tokens, key=lambda t: t.left):
+        if not merged:
+            merged.append(tok)
+            continue
+
+        prev = merged[-1]
+        gap = tok.left - prev.right
+        overlap = min(prev.right, tok.right) - max(prev.left, tok.left)
+        min_width = max(1, min(prev.width, tok.width))
+
+        if gap < 0 and overlap >= int(0.6 * min_width):
+            best, other = (tok, prev) if _score_band_token(tok.text, tok.conf) > _score_band_token(prev.text, prev.conf) else (prev, tok)
+            new_conf = max(prev.conf, tok.conf)
+            merged[-1] = replace(best, conf=new_conf)
+            continue
+
+        max_gap = max(2, int(0.5 * min_width))
+        if gap <= max_gap:
+            new_left = min(prev.left, tok.left)
+            new_top = min(prev.top, tok.top)
+            new_right = max(prev.right, tok.right)
+            new_bottom = max(prev.bottom, tok.bottom)
+            merged[-1] = _OcrToken(
+                left=new_left,
+                top=new_top,
+                width=new_right - new_left,
+                height=new_bottom - new_top,
+                conf=min(prev.conf, tok.conf),
+                text=prev.text + tok.text,
+            )
+            continue
+
+        merged.append(tok)
+
+    return merged
+
+
 def _run_psm7_band_pass(
     sub_img_bin: "Image.Image",
     sub_img_gray: "Image.Image",
@@ -271,7 +364,7 @@ def _read_counts_from_roi(roi, timeout_sec: int = 6) -> Tuple[Dict[ShardType, in
         "--oem 3 --psm 11 -c tessedit_char_whitelist=0123456789., -c preserve_interword_spaces=1 -c classify_bln_numeric_mode=1",
     ]
 
-    tokens: List[Tuple[int, int, float, str]] = []  # (cx, cy, conf, text)
+    token_map: Dict[Tuple[int, int, int, int, str], _OcrToken] = {}
     W, H = bin_img.size
     # Accept up to ~60% of the left rail; still rejects mid-screen counters (e.g., 238/270).
     left_frac = 0.60
@@ -305,23 +398,29 @@ def _read_counts_from_roi(roi, timeout_sec: int = 6) -> Tuple[Dict[ShardType, in
                 cx = x + w // 2; cy = y + h // 2
                 if cx > max_x:
                     continue
-                tokens.append((cx, cy, conf, txt))
+                token = _OcrToken(left=x, top=y, width=w, height=h, conf=conf, text=txt)
+                key = _rounded_token_key(token)
+                prev = token_map.get(key)
+                if prev is None or conf > prev.conf:
+                    token_map[key] = token
 
         # If we've found a healthy number of candidates, stop early.
-        if len(tokens) >= 8:
+        if len(token_map) >= 8:
             break
 
     # Split ROI into 5 vertical bands; pick best token per band.
     counts_by_band: List[int] = []
     band_h = H / 5.0
+    tokens = list(token_map.values())
     for band in range(5):
         y0 = band * band_h
         y1 = (band + 1) * band_h
-        cands = [(cx, cy, conf, txt) for (cx, cy, conf, txt) in tokens if (y0 <= cy < y1)]
+        cands = [tok for tok in tokens if y0 <= tok.cy < y1]
+        cands = _merge_band_tokens(cands)
         main_pick: Tuple[str, float] | None = None
         if cands:
-            best = max(cands, key=lambda t: _score_band_token(t[3], t[2]))
-            main_pick = (best[3], best[2])
+            best = max(cands, key=lambda t: _score_band_token(t.text, t.conf))
+            main_pick = (best.text, best.conf)
 
         micro_pick: Tuple[str, float] | None = None
         bx0, bx1 = 0, max_x
