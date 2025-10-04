@@ -120,12 +120,8 @@ def extract_counts_with_debug(
     Same as extract_counts_from_image_bytes, but also returns debug images:
     [("roi_gray.png", ...), ("roi_bin.png", ...), ("roi_bin_inv.png", ...)]
     Only the first ratio is exported as debug imagery.
-
-    If Tesseract is missing, this still returns debug images so you can see
-    exactly what the OCR *would* read.
     """
-    # We can still produce debug imagery without Tesseract
-    if Image is None or ImageOps is None:
+    if pytesseract is None or Image is None or ImageOps is None:
         return ({}, [])
 
     try:
@@ -148,10 +144,6 @@ def extract_counts_with_debug(
             dbg.append(("roi_bin_inv.png", _img_to_png_bytes(ImageOps.invert(bin0))))
         except Exception:
             pass
-
-        # If tesseract is not available, return debug only
-        if pytesseract is None:
-            return ({}, dbg)
 
         # Choose the best among all ratios
         best_counts: Dict[ShardType, int] = {}
@@ -218,31 +210,27 @@ def _read_counts_from_roi(roi, timeout_sec: int = 6) -> Tuple[Dict[ShardType, in
     binary → inverted-binary → gray; and two configs (PSM 11 then PSM 6).
     Returns (counts, score) where score = number of bands with nonzero readings.
     """
-    if pytesseract is None or Output is None:
-        return ({st: 0 for st in (
-            ShardType.MYSTERY, ShardType.ANCIENT, ShardType.VOID, ShardType.PRIMAL, ShardType.SACRED
-        )}, 0)
-
     gray, bin_img = _preprocess_roi(roi)
 
     # candidate images to try
-    candidates: List["Image.Image"] = [bin_img]
+    candidates: List[Image.Image] = [bin_img]
     try:
         candidates.append(ImageOps.invert(bin_img))
     except Exception:
         pass
     candidates.append(gray)
 
-    # OCR configs to try (prefer sparse text)
+    # OCR configs to try (prefer sparse text first)
     cfgs = [
         "--oem 1 --psm 11 -c tessedit_char_whitelist=0123456789., -c preserve_interword_spaces=1 -c classify_bln_numeric_mode=1",
         "--oem 1 --psm 6  -c tessedit_char_whitelist=0123456789., -c preserve_interword_spaces=1 -c classify_bln_numeric_mode=1",
     ]
 
-    # gather tokens across passes
     tokens: List[Tuple[int, int, float, str]] = []  # (cx, cy, conf, text)
-    W, H = bin_img.size  # candidates share size
-    max_x = int(W * 0.60)  # keep away from right-side counters like 238/270
+    W, H = bin_img.size
+    # Be strict: we only want numbers from the left icon/stack, not mid-screen counters.
+    left_frac = 0.35
+    max_x = int(W * left_frac)
 
     for img in candidates:
         for cfg in cfgs:
@@ -259,36 +247,79 @@ def _read_counts_from_roi(roi, timeout_sec: int = 6) -> Tuple[Dict[ShardType, in
                 if not raw:
                     continue
                 txt = _normalize_digits(raw).replace("\u00A0", " ")
-                # only keep things that look like integers with optional separators
                 if not (_NUM_RE.match(txt) or txt.isdigit()):
                     continue
                 try:
                     conf = float(dd["conf"][i])
                 except Exception:
                     conf = -1.0
-                if conf < 10:  # slightly permissive; we’ll re-rank per band
+                if conf < 10:
                     continue
                 x = int(dd["left"][i]); y = int(dd["top"][i])
                 w = int(dd["width"][i]); h = int(dd["height"][i])
                 cx = x + w // 2; cy = y + h // 2
                 if cx > max_x:
                     continue
+                # light sanity on size
+                if h < 10 or h > int(H * 0.35):
+                    continue
                 tokens.append((cx, cy, conf, txt))
 
-        # short-circuit if we already have a healthy amount of tokens
-        if len(tokens) >= 5:
+        # If we've found a healthy number of candidates, stop early.
+        if len(tokens) >= 8:
             break
 
-    # Split ROI into 5 vertical bands, pick best token per band
+    # Split ROI into 5 vertical bands; pick best token per band.
     counts_by_band: List[int] = []
     band_h = H / 5.0
     for band in range(5):
         y0 = band * band_h
         y1 = (band + 1) * band_h
-        cands = [(cx, cy, conf, txt) for (cx, cy, conf, txt) in tokens if y0 <= cy < y1]
+        cands = [(cx, cy, conf, txt) for (cx, cy, conf, txt) in tokens if (y0 <= cy < y1)]
         if not cands:
-            counts_by_band.append(0)
+            # Fallback: micro-ocr on a narrow band slice on the far left
+            bx0, bx1 = 0, max_x
+            by0 = int(y0 + band_h * 0.15)
+            by1 = int(y0 + band_h * 0.85)
+            try:
+                sub = roi.crop((bx0, by0, bx1, by1))
+                sub_gray, sub_bin = _preprocess_roi(sub)
+                # try bin first then gray with a tighter PSM 7 (single line-ish)
+                for sub_img in (sub_bin, sub_gray):
+                    try:
+                        dd2 = pytesseract.image_to_data(
+                            sub_img,
+                            output_type=Output.DICT,
+                            config="--oem 1 --psm 7 -c tessedit_char_whitelist=0123456789., -c classify_bln_numeric_mode=1",
+                            timeout=max(2, timeout_sec // 2),
+                        )
+                    except Exception:
+                        continue
+                    picks: List[Tuple[float, str]] = []
+                    m = len(dd2.get("text", []))
+                    for j in range(m):
+                        raw2 = (dd2["text"][j] or "").strip()
+                        if not raw2:
+                            continue
+                        t2 = _normalize_digits(raw2)
+                        if not (_NUM_RE.match(t2) or t2.isdigit()):
+                            continue
+                        try:
+                            conf2 = float(dd2["conf"][j])
+                        except Exception:
+                            conf2 = -1.0
+                        if conf2 >= 10:
+                            picks.append((conf2, t2))
+                    if picks:
+                        best_txt = max(picks, key=lambda p: (p[0], len(p[1])))[1]
+                        counts_by_band.append(_parse_num_token(best_txt))
+                        break
+                else:
+                    counts_by_band.append(0)
+            except Exception:
+                counts_by_band.append(0)
             continue
+
         best = max(cands, key=lambda t: (t[2], len(t[3])))
         counts_by_band.append(_parse_num_token(best[3]))
 
