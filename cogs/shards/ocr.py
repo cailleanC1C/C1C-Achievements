@@ -94,9 +94,9 @@ def extract_counts_from_image_bytes(data: bytes) -> Dict[ShardType, int]:
 
         for r in ratios:
             roi = _left_rail_crop(base, r)
-            counts, score = _read_counts_from_roi(roi)
-            if score > best_score:
-                best_counts, best_score = counts, score
+            counts, _score = _read_counts_from_roi(roi, timeout_sec=8)
+            if _score > best_score:
+                best_counts, best_score = counts, _score
 
         # Ensure all shard keys exist
         for st in ShardType:
@@ -110,7 +110,9 @@ def extract_counts_from_image_bytes(data: bytes) -> Dict[ShardType, int]:
         return {}
 
 
-def extract_counts_with_debug(data: bytes) -> Tuple[Dict[ShardType, int], List[Tuple[str, bytes]]]:
+def extract_counts_with_debug(
+    data: bytes, timeout_sec: int = 8
+) -> Tuple[Dict[ShardType, int], List[Tuple[str, bytes]]]:
     """
     Same as extract_counts_from_image_bytes, but also returns a list of debug images:
     [("roi_gray.png", ...), ("roi_bin.png", ...)] to be uploaded for inspection.
@@ -141,7 +143,7 @@ def extract_counts_with_debug(data: bytes) -> Tuple[Dict[ShardType, int], List[T
         best_score = -1
         for r in ratios:
             roi = _left_rail_crop(base, r)
-            counts, score = _read_counts_from_roi(roi)
+            counts, score = _read_counts_from_roi(roi, timeout_sec=timeout_sec)
             if score > best_score:
                 best_counts, best_score = counts, score
 
@@ -195,7 +197,7 @@ def _parse_num_token(raw: str) -> int:
     return int(t) if t.isdigit() else 0
 
 
-def _read_counts_from_roi(roi: "Image.Image") -> Tuple[Dict[ShardType, int], int]:
+def _read_counts_from_roi(roi, timeout_sec: int = 8) -> Tuple[Dict[ShardType, int], int]:
     """
     OCR the ROI and split vertically into 5 bands. For each band, pick the best numeric token.
     Returns (counts, score) where score = number of bands with nonzero readings.
@@ -208,7 +210,7 @@ def _read_counts_from_roi(roi: "Image.Image") -> Tuple[Dict[ShardType, int], int
         "-c preserve_interword_spaces=1 "
         "-c classify_bln_numeric_mode=1"
     )
-    dd = pytesseract.image_to_data(bin_img, output_type=Output.DICT, config=cfg)
+    dd = pytesseract.image_to_data(bin_img, output_type=Output.DICT, config=cfg, timeout=timeout_sec)
 
     W, H = bin_img.size
     # Prefer tokens close to the left half of ROI (avoid mid-screen counters like 238/270)
