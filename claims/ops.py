@@ -48,11 +48,20 @@ def build_health_embed(bot_version: str, summary: dict) -> discord.Embed:
     ]
     e.add_field(name="Runtime", value="\n".join(runtime_lines), inline=False)
 
+    status = cfg.get("status", "—")
+    ready_flag = cfg.get("ready", False)
     config_lines = [
+        f"Status: **{status}** (ready: **{ready_flag}**)",
         f"Source: **{cfg.get('source', '—')}**",
         f"Loaded at: **{cfg.get('loaded_at', '—')}**",
         f"Achievements: **{cnt.get('ach', 0)}** • Categories: **{cnt.get('cat', 0)}** • Levels: **{cnt.get('lvls', 0)}** • Reasons: **{cnt.get('reasons', 0)}**",
     ]
+    err = cfg.get("last_error")
+    if err:
+        err_txt = str(err)
+        if len(err_txt) > 180:
+            err_txt = err_txt[:177] + "…"
+        config_lines.append(f"Last error: `{err_txt}`")
     e.add_field(name="Config", value="\n".join(config_lines), inline=False)
 
     targets_lines = [
@@ -86,13 +95,17 @@ def build_digest_line(summary: dict) -> str:
     last_s = rt.get("last_event_age_s")
     src    = cfg.get("source", "—")
     when   = cfg.get("loaded_at", "—")
+    status = cfg.get("status", "—")
+    ready  = cfg.get("ready")
+    err    = cfg.get("last_error")
+    err_flag = "ok" if not err else "err"
 
     def _fmt(v): return str(v) if v is not None else "—"
 
     return (
         "🏆 Claims digest — "
         f"ready:{ready} | latency:{_fmt(lat_ms)}ms | last_event:{_fmt(last_s)}s | "
-        f"cfg:{src} @ {when} | "
+        f"cfg:{src} @ {when} | cfg_status:{status}/{ready} ({err_flag}) | "
         f"ach:{cnt.get('ach', 0)} cat:{cnt.get('cat', 0)} lvls:{cnt.get('lvls', 0)} reasons:{cnt.get('reasons', 0)} | "
         f"claims_thread:{flg.get('claims','—')} levels:{flg.get('levels','—')} audit:{flg.get('audit','—')} GK:{flg.get('gk_role','—')}"
     )

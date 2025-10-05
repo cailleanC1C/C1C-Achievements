@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 import discord
 from discord.ext import commands
 from flask import Flask
+from aiohttp import ClientConnectorError
 
 from core.prefix import get_prefix
 
@@ -127,8 +128,10 @@ CATEGORIES: List[dict] = []
 ACHIEVEMENTS: Dict[str, dict] = {}
 LEVELS: List[dict] = []
 REASONS: Dict[str, str] = {}
-CONFIG_META = {"source": "—", "loaded_at": None}
+CONFIG_META = {"source": "—", "loaded_at": None, "status": "cold", "last_error": None}
+CONFIG_READY = asyncio.Event()
 _AUTO_REFRESH_TASK: Optional[asyncio.Task] = None
+_INITIAL_CONFIG_TASK: Optional[asyncio.Task] = None
 
 # ---- claim lifecycle: first prompt message id -> "open" | "canceled" | "expired" | "closed"
 CLAIM_STATE: Dict[int, str] = {}
@@ -202,6 +205,10 @@ def load_config():
 
     loaded = False
     source = "—"
+    last_exc: Optional[Exception] = None
+
+    CONFIG_META["status"] = "loading"
+    CONFIG_META["last_error"] = None
 
     if sid and gspread:
         try:
@@ -240,6 +247,7 @@ def load_config():
             log.info("Config loaded from Google Sheets")
         except Exception as e:
             log.warning(f"GSheet load failed: {e}", exc_info=True)
+            last_exc = e
 
     if not loaded and local and pd:
         try:
@@ -275,12 +283,46 @@ def load_config():
             log.info("Config loaded from Excel")
         except Exception as e:
             log.error(f"Excel load failed: {e}", exc_info=True)
+            last_exc = e
 
     if not loaded:
+        CONFIG_META["status"] = "error"
+        CONFIG_META["last_error"] = str(last_exc) if last_exc else "no config source succeeded"
         raise RuntimeError("No config loaded. Set CONFIG_SHEET_ID (+SERVICE_ACCOUNT_JSON) or LOCAL_CONFIG_XLSX.")
 
     CONFIG_META["source"] = source
     CONFIG_META["loaded_at"] = datetime.datetime.utcnow()
+    CONFIG_META["status"] = "ready"
+    CONFIG_META["last_error"] = None
+    CONFIG_READY.set()
+
+
+async def _ensure_config_loaded(initial: bool = False) -> None:
+    """Ensure configuration is present, retrying with backoff when booting."""
+    if CONFIG_READY.is_set() and CONFIG_META.get("status") == "ready":
+        return
+
+    base_delay = 5
+    attempt = 0
+
+    while True:
+        try:
+            load_config()
+            return
+        except Exception as e:
+            attempt += 1
+            wait = min(300, base_delay * (2 ** (attempt - 1)))
+            CONFIG_META["status"] = "error"
+            CONFIG_META["last_error"] = str(e)
+            CONFIG_READY.clear()
+
+            level = logging.ERROR if attempt <= 3 else logging.WARNING
+            log.log(level, f"[config] load failed (attempt {attempt}): {e}", exc_info=attempt <= 3)
+
+            if not initial:
+                raise
+
+            await asyncio.sleep(wait)
 
 # ---------- COG LOADER ----------
 async def _load_ext(name: str) -> bool:
@@ -1497,13 +1539,15 @@ async def on_message(msg: discord.Message):
 
 # ---------------- startup ----------------
 async def _auto_refresh_loop(minutes: int):
+    interval = max(1, minutes) * 60
+    await CONFIG_READY.wait()
     while True:
         try:
-            await asyncio.sleep(minutes * 60)
+            await asyncio.sleep(interval)
             load_config()
             log.info(f"Auto-refreshed config from {CONFIG_META['source']} at {CONFIG_META['loaded_at']}")
         except Exception:
-            log.exception("Auto-refresh failed")
+            log.exception("Auto-refresh failed; keeping previous config")
 
 @bot.event
 async def on_connect():
@@ -1535,13 +1579,15 @@ async def on_ready():
     BOT_CONNECTED = True
     _touch_event()
     log.info(f"Logged in as {bot.user} ({bot.user.id})")
-    try:
-        load_config()
-        log.info("Configuration loaded.")
-    except Exception as e:
-        log.error(f"Config error: {e}")
-        await bot.close()
-        return
+    global _INITIAL_CONFIG_TASK
+    if CONFIG_READY.is_set() and CONFIG_META.get("status") == "ready":
+        log.info("Configuration already loaded.")
+    else:
+        if _INITIAL_CONFIG_TASK is None or _INITIAL_CONFIG_TASK.done():
+            _INITIAL_CONFIG_TASK = asyncio.create_task(_ensure_config_loaded(initial=True))
+            log.info("Scheduled initial config load with backoff")
+        else:
+            log.info("Initial config load already scheduled (status=%s)", CONFIG_META.get("status"))
 
     mins = int(os.getenv("CONFIG_AUTO_REFRESH_MINUTES", "0") or "0")
     global _AUTO_REFRESH_TASK
@@ -1556,9 +1602,56 @@ async def on_ready():
     except Exception:
         pass
 
+
+async def _run_bot(token: str) -> None:
+    base_delay = 5
+    attempt = 0
+
+    while True:
+        try:
+            await bot.login(token)
+            attempt = 0
+            await bot.connect(reconnect=True)
+            log.info("Bot connection closed gracefully; exiting run loop")
+            break
+        except discord.LoginFailure as e:
+            log.error("Login failed: %s", e)
+            raise
+        except ClientConnectorError as e:
+            attempt += 1
+            wait = min(600, base_delay * (2 ** (attempt - 1)))
+            log.warning("[startup] Network connect error: %s — retrying in %ss", e, wait)
+            await asyncio.sleep(wait)
+        except discord.HTTPException as e:
+            attempt += 1
+            wait = min(600, base_delay * (2 ** (attempt - 1)))
+            status = getattr(e, "status", None)
+            message = str(e)
+            if status in {429, 503} or "rate limited" in message.lower() or "banned" in message.lower():
+                log.warning(
+                    "[startup] Discord refused the connection (status=%s). Cooling down for %ss before retry.",
+                    status,
+                    wait,
+                )
+            else:
+                log.exception("[startup] discord.HTTPException (status=%s)", status)
+            await asyncio.sleep(wait)
+        except Exception as e:
+            attempt += 1
+            wait = min(600, base_delay * (2 ** (attempt - 1)))
+            log.exception("[startup] Unexpected exception: %s — retrying in %ss", e, wait)
+            await asyncio.sleep(wait)
+        finally:
+            if not bot.is_closed():
+                try:
+                    await bot.close()
+                except Exception:
+                    pass
+
+
 if __name__ == "__main__":
     token = os.getenv("DISCORD_BOT_TOKEN") or os.getenv("DISCORD_TOKEN")
     if not token:
         raise SystemExit("Set DISCORD_BOT_TOKEN")
     keep_alive()
-    bot.run(token)
+    asyncio.run(_run_bot(token))
