@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.2] – 2025-10-05
+
+### Reliability
+
+* Added guarded startup loop with exponential backoff so Cloudflare 1015/429 responses pause reconnect attempts instead of bouncing the process.
+* Replaced the fatal config bootstrap with a background retry worker that survives transient Google Sheets outages and advertises status/last-error metadata via CoreOps embeds.
+* Documented the offline investigation and mitigation steps in `docs/offline_analysis.md` for future incident response.
+
 ## [1.0.1] – 2025-10-02
 
 ### Fixes

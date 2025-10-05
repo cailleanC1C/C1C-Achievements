@@ -81,6 +81,9 @@ class OpsCog(commands.Cog):
                 "loaded_at": app.CONFIG_META["loaded_at"].strftime("%Y-%m-%d %H:%M UTC")
                 if app.CONFIG_META.get("loaded_at")
                 else "—",
+                "status": app.CONFIG_META.get("status", "—"),
+                "ready": app.CONFIG_READY.is_set(),
+                "last_error": app.CONFIG_META.get("last_error"),
             },
             "counts": {
                 "ach": len(app.ACHIEVEMENTS),
@@ -139,6 +142,9 @@ class OpsCog(commands.Cog):
                 "loaded_at": app.CONFIG_META["loaded_at"].strftime("%Y-%m-%d %H:%M UTC")
                 if app.CONFIG_META.get("loaded_at")
                 else "—",
+                "status": app.CONFIG_META.get("status", "—"),
+                "ready": app.CONFIG_READY.is_set(),
+                "last_error": app.CONFIG_META.get("last_error"),
             },
             "counts": {
                 "ach": len(app.ACHIEVEMENTS),
