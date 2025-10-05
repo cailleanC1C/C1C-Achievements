@@ -1370,7 +1370,11 @@ async def flushpraise(ctx: commands.Context):
 
 @bot.command(name="ping")
 async def ping(ctx: commands.Context):
-    await ctx.send("🏓 Pong — Live and listening.")
+    # react-only liveness check
+    try:
+        await ctx.message.add_reaction("🏓")
+    except Exception:
+        pass
 
 # ---------------- help (overview + subtopics, silent on unknown) ----------------
 HELP_COLOR = discord.Color.blurple()
