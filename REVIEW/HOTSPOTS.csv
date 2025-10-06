@@ -1,0 +1,4 @@
+file,path,function,start_line,end_line,complexity,loc,tags,notes
+c1c_claims_appreciation.py,c1c_claims_appreciation.py,process_claim,1113,1205,">=20 (manual est)",93,"async;claims;branch-heavy","Multiple nested flows for auto-grant vs GK review; consider splitting into helpers and unit tests."
+c1c_claims_appreciation.py,c1c_claims_appreciation.py,on_message,1459,1542,">=25 (manual est)",84,"listener;multi-responsibility","Handles command dispatch, level-up watcher, and claim entry; hard to reason about failure paths."
+cogs/shards/cog.py,cogs/shards/cog.py,on_message,128,343,">=30 (manual est)",216,"listener;OCR;UI","Long handler orchestrating OCR background tasks and interaction callbacks; prone to regressions without coverage."
