@@ -1,0 +1,66 @@
+# Issue Bulk Create Attempt
+
+The following command was attempted to create issues for the "Claims & Shards Robustness (R1)" milestone, but the `codex` CLI is not available in the execution environment.
+
+```bash
+codex issues bulk-create --milestone "Claims & Shards Robustness (R1)" --data - <<'JSON'
+[
+  {
+    "title": "P0 — Off-thread config reload to prevent event-loop stalls",
+    "body": "**Why**: Google Sheets I/O during config reload blocks gateway.\n\n**Scope**: Introduce `load_config_async()` (off-thread) and await it at every call site (manual reload + auto-refresh). Ensure background task uses async path.\n\n**Acceptance**:\n- During a forced slow reload, `!ping` still responds.\n- Auto-refresh completes without gateway stalls.\n- Logs show reload start/end with duration.",
+    "labels": ["area:config", "perf", "robustness", "bug"],
+    "assignees": []
+  },
+  {
+    "title": "P1 — Fix digest readiness misreport (runtime vs config)",
+    "body": "**Why**: `!digest` currently overwrites runtime readiness with config state.\n\n**Scope**: Display both `gateway_ready` and `config_ready` distinctly in digest.\n\n**Acceptance**:\n- `!digest` shows `ready:<gateway>` and `cfg:<status>/<config_ready>`.\n- Before/after snapshot added to PR.",
+    "labels": ["area:ops", "bug", "observability"],
+    "assignees": []
+  },
+  {
+    "title": "P1 — Shards summary header logic crashes on populated sheet",
+    "body": "**Why**: Header append runs even when rows exist, causing failures.\n\n**Scope**: Only append header on empty sheet; otherwise update in place.\n\n**Acceptance**:\n- Two consecutive summary updates succeed on a non-empty sheet.\n- No duplicate headers.",
+    "labels": ["area:shards", "bug", "robustness"],
+    "assignees": []
+  },
+  {
+    "title": "P2 — Add slow-reload integration check + jitter/backoff",
+    "body": "**Why**: Prove non-blocking behavior and resilience under repeated failures.\n\n**Scope**: Test harness or manual script that forces slow reload; add jitter/backoff to auto-refresh failure path.\n\n**Acceptance**:\n- 10-minute run with forced delays shows zero gateway timeouts.\n- Logs show exponential backoff with cap.",
+    "labels": ["area:config", "observability", "perf", "robustness"],
+    "assignees": []
+  },
+  {
+    "title": "P2 — Batch & retry shard writes to reduce quota pressure",
+    "body": "**Why**: Per-event writes increase API calls and flake under load.\n\n**Scope**: Replace single-row writes with batch updates + bounded retries with backoff.\n\n**Acceptance**:\n- Load test shows fewer API calls per window.\n- Transient failures recover without user-facing errors.",
+    "labels": ["area:shards", "perf", "robustness"],
+    "assignees": []
+  },
+  {
+    "title": "P3 — Lint cleanup (Ruff)",
+    "body": "**Why**: Improve readability, consistency, and CI signal.\n\n**Scope**: Run `ruff --fix`; resolve remaining violations by hand; add lint job in CI if missing.\n\n**Acceptance**:\n- `ruff check .` passes clean.\n- Diffstat attached in PR description.",
+    "labels": ["lint", "devx"],
+    "assignees": []
+  },
+  {
+    "title": "P3 — Typecheck fix (mypy duplicate-module discovery)",
+    "body": "**Why**: Current layout makes mypy see modules twice, blocking typing in CI.\n\n**Scope**: Normalize import paths; ensure package `__init__.py` and mypy config (`--explicit-package-bases` or equivalent) agree.\n\n**Acceptance**:\n- `mypy .` runs to completion without duplicate-module errors.\n- Document chosen package layout in `ARCH_MAP.md`.",
+    "labels": ["typecheck", "devx"],
+    "assignees": []
+  },
+  {
+    "title": "P4 — Threat-model guardrails enforcement (ops & secrets)",
+    "body": "**Why**: Ensure privilege boundaries hold and secrets never leak in logs.\n\n**Scope**: Verify staff-only ops (`!health`, `!reload`, etc.) are gated; redact tokens/SA JSON everywhere; log denials explicitly.\n\n**Acceptance**:\n- Negative tests for non-staff users.\n- Grep logs show no secret material; denial events recorded.",
+    "labels": ["threat-model", "security", "area:ops"],
+    "assignees": []
+  },
+  {
+    "title": "P4 — Architecture stabilization toward carve-out parity",
+    "body": "**Why**: Prepare clean seams for future splits and testing.\n\n**Scope**: Stabilize boundaries: Config adapter, Claims service, Praise publisher, Shard service, centralized Audit. Align helper utilities with Reminder bot to avoid drift.\n\n**Acceptance**:\n- Minimal interface stubs in place; unit tests for Claims service exist.\n- `ARCH_MAP.md` updated to reflect boundaries.",
+    "labels": ["architecture", "area:claims", "area:shards", "devx"],
+    "assignees": []
+  }
+]
+JSON
+```
+
+*Result*: `bash` reported `command not found: codex`.
