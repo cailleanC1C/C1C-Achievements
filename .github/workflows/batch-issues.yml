@@ -1,63 +1,141 @@
-name: Batch create issues
+name: Deploy to Render (queued, latest-wins)
 
 on:
+  push:
+    branches: [ main ]
+    paths:
+      - "bot_reminders.py"
+      - "reminders/**"
+      - "cogs/**"
+      - "ops/**"
+      - "adapters/**"
+      - "services/**"
+      - "repositories/**"
+      - "domain/**"
+      - "requirements.txt"
+      - "pyproject.toml"
+      - "poetry.lock"
   workflow_dispatch:
     inputs:
-      file:
-        description: "Path to issues JSON or YAML inside this repo"
-        required: true
-        default: ".github/issue-batches/issues.json"
+      cancel_previous:
+        description: "Cancel any in-progress Render deploy before deploying?"
+        required: false
+        default: "false"
+
+concurrency:
+  group: render-deploy-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  create:
+  deploy:
     runs-on: ubuntu-latest
-    permissions:
-      issues: write
-      contents: read
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Ensure jq & yq
+      - name: Show context
         run: |
-          sudo apt-get update
-          sudo apt-get install -y jq yq || true
+          echo "SHA: $GITHUB_SHA"
+          echo "Branch: $GITHUB_REF_NAME"
+          echo "Cancel previous: ${{ github.event.inputs.cancel_previous || 'false' }}"
 
-      - name: Validate input file exists
-        id: pick
-        run: |
-          FILE="${{ github.event.inputs.file }}"
-          if [ ! -f "$FILE" ]; then
-            echo "File not found: $FILE" >&2
-            exit 1
-          fi
-          echo "file=$FILE" >> $GITHUB_OUTPUT
+      - name: Ensure Node (for small API script)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
-      - name: Create standard labels (safe to re-run)
+      - name: Wait (or cancel) existing Render deploys
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+          CANCEL_PREVIOUS: ${{ github.event.inputs.cancel_previous || 'false' }}
         run: |
-          for L in \
-            "severity:critical" "severity:high" "severity:medium" "severity:low" \
-            "area:scheduler" "area:infra" "area:reminders" "area:data" "area:commands" "area:ops" "area:devx" \
-            "type:bug" "type:perf" "type:hardening" "type:security" "type:tooling"
-          do
-            gh label create "$L" --repo "${{ github.repository }}" --color cccccc --description "$L" || true
-          done
+          cat >wait_render.js <<'JS'
+          const https = require('https');
 
-      - name: Normalize issues file to JSON
-        run: |
-          FILE="${{ steps.pick.outputs.file }}"
-          case "$FILE" in
-            *.yml|*.yaml) yq -o=json "$FILE" > issues.json ;;
-            *.json) cp "$FILE" issues.json ;;
-            *) echo "Unsupported file type: $FILE" >&2; exit 1 ;;
-          esac
+          const API = 'api.render.com';
+          const key = process.env.RENDER_API_KEY;
+          const svc = process.env.RENDER_SERVICE_ID;
+          const cancelPrev = (process.env.CANCEL_PREVIOUS || 'false').toLowerCase() === 'true';
 
-      - name: Create issues from JSON array
+          function req(path, method='GET', body=null){
+            const opts = {
+              hostname: API, path, method,
+              headers: {
+                'Authorization': `Bearer ${key}`,
+                'Accept': 'application/json',
+                'Content-Type': 'application/json'
+              }
+            };
+            return new Promise((resolve, reject)=>{
+              const r = https.request(opts, res=>{
+                let d=''; res.on('data', c=>d+=c);
+                res.on('end', ()=> {
+                  if(res.statusCode>=200 && res.statusCode<300){
+                    resolve(d ? JSON.parse(d) : {});
+                  } else {
+                    reject(new Error(`HTTP ${res.statusCode} ${path}: ${d}`));
+                  }
+                });
+              });
+              r.on('error', reject);
+              if(body) r.write(JSON.stringify(body));
+              r.end();
+            });
+          }
+
+          async function getLatestDeploy(){
+            // Fetch last 1–2 deploys; Render returns most recent first
+            const data = await req(`/v1/services/${svc}/deploys?limit=2`);
+            return Array.isArray(data) && data.length ? data[0] : null;
+          }
+
+          async function cancelDeploy(id){
+            return req(`/v1/deploys/${id}/cancel`, 'POST');
+          }
+
+          function isActive(status){
+            // statuses: 'build_in_progress','update_in_progress','live','deactivated','failed','canceled','build_failed', etc.
+            return ['build_in_progress','update_in_progress','in_progress'].includes(status);
+          }
+
+          async function waitUntilClear(){
+            const start = Date.now();
+            const timeoutMs = 30 * 60 * 1000; // 30 min safety
+            const tick = 10 * 1000;
+
+            while(true){
+              const dep = await getLatestDeploy();
+              if(!dep){ return; }
+
+              const st = dep.status || dep.deploy?.status || '';
+              const id = dep.id || dep.deploy?.id || 'unknown';
+
+              if(isActive(st)){
+                if(cancelPrev){
+                  console.log(`Found active deploy ${id} (${st}). Canceling…`);
+                  try { await cancelDeploy(id); console.log('Canceled.'); }
+                  catch(e){ console.log('Cancel failed, will keep waiting:', e.message); }
+                } else {
+                  console.log(`Active deploy ${id} (${st}) — waiting…`);
+                }
+              } else {
+                // Not active — lane clear
+                return;
+              }
+
+              if(Date.now() - start > timeoutMs){
+                throw new Error('Timeout waiting for Render deploy to finish/cancel.');
+              }
+              await new Promise(r=>setTimeout(r, tick));
+            }
+          }
+
+          waitUntilClear().then(()=>console.log('Lane clear.')).catch(e=>{ console.error(e.message); process.exit(1); });
+          JS
+          node wait_render.js
+
+      - name: Trigger new Render deploy
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
         run: |
-          jq -c '.[]' issues.json | while read -r item; do
-            title=$(jq -r '.title'  <<<"$item")
-            body=$(jq -r '.body'   <<<"$item")
-            labels=$(jq -r '.labels | join(",")' <<<"$item")
-            echo "Creating: $title"
-            gh issue create --repo "${{ github.repository }}" \
-              --title "$title" --label "$labels" --body "$body"
-          done
+          echo "Triggering Render deploy…"
+          curl -fsSL -X POST "$RENDER_DEPLOY_HOOK_URL"
+          echo "Deploy hook triggered."
