@@ -12,6 +12,6 @@ jobs:
       - name: Add to org project
         uses: actions/add-to-project@v1.0.2
         with:
-          project-url: https://github.com/orgs/cailleanC1C/projects/1
+          project-url: https://github.com/users/cailleanC1C/projects/1
           github-token: ${{ secrets.PROJECTS_TOKEN }}
 
