@@ -1,1 +1,101 @@
+{
+  "milestone": "Claims & Shards Robustness (R1)",
+  "defaults": {
+    "labels": [],
+    "assignees": []
+  },
+  "issues": [
+    {
+      "title": "P0 — Off-thread config reload to prevent event-loop stalls",
+      "body": "**Why**: Google Sheets I/O during config reload blocks gateway.\n\n**Scope**: Introduce `load_config_async()` (off-thread) and await it at every call site (manual reload + auto-refresh). Ensure background task uses async path.\n\n**Acceptance**:\n- During a forced slow reload, `!ping` still responds.\n- Auto-refresh completes without gateway stalls.\n- Logs show reload start/end with duration.",
+      "labels": ["area:config", "perf", "robustness", "bug"],
+      "assignees": [],
+      "acceptance_criteria": [
+        "During a forced slow reload, !ping still responds.",
+        "Auto-refresh completes without gateway stalls.",
+        "Logs show reload start/end with duration."
+      ]
+    },
+    {
+      "title": "P1 — Fix digest readiness misreport (runtime vs config)",
+      "body": "**Why**: `!digest` currently overwrites runtime readiness with config state.\n\n**Scope**: Display both `gateway_ready` and `config_ready` distinctly in digest.\n\n**Acceptance**:\n- `!digest` shows `ready:<gateway>` and `cfg:<status>/<config_ready>`.\n- Before/after snapshot added to PR.",
+      "labels": ["area:ops", "bug", "observability"],
+      "assignees": [],
+      "acceptance_criteria": [
+        "`!digest` shows ready:<gateway> and cfg:<status>/<config_ready>.",
+        "Before/after snapshot added to PR."
+      ]
+    },
+    {
+      "title": "P1 — Shards summary header logic crashes on populated sheet",
+      "body": "**Why**: Header append runs even when rows exist, causing failures.\n\n**Scope**: Only append header on empty sheet; otherwise update in place.\n\n**Acceptance**:\n- Two consecutive summary updates succeed on a non-empty sheet.\n- No duplicate headers.",
+      "labels": ["area:shards", "bug", "robustness"],
+      "assignees": [],
+      "acceptance_criteria": [
+        "Two consecutive summary updates succeed on a non-empty sheet.",
+        "No duplicate headers."
+      ]
+    },
+    {
+      "title": "P2 — Add slow-reload integration check + jitter/backoff",
+      "body": "**Why**: Prove non-blocking behavior and resilience under repeated failures.\n\n**Scope**: Test harness or manual script that forces slow reload; add jitter/backoff to auto-refresh failure path.\n\n**Acceptance**:\n- 10-minute run with forced delays shows zero gateway timeouts.\n- Logs show exponential backoff with cap.",
+      "labels": ["area:config", "observability", "perf", "robustness"],
+      "assignees": [],
+      "acceptance_criteria": [
+        "10-minute run with forced delays shows zero gateway timeouts.",
+        "Logs show exponential backoff with cap."
+      ]
+    },
+    {
+      "title": "P2 — Batch & retry shard writes to reduce quota pressure",
+      "body": "**Why**: Per-event writes increase API calls and flake under load.\n\n**Scope**: Replace single-row writes with batch updates + bounded retries with backoff.\n\n**Acceptance**:\n- Load test shows fewer API calls per window.\n- Transient failures recover without user-facing errors.",
+      "labels": ["area:shards", "perf", "robustness"],
+      "assignees": [],
+      "acceptance_criteria": [
+        "Load test shows fewer API calls per window.",
+        "Transient failures recover without user-facing errors."
+      ]
+    },
+    {
+      "title": "P3 — Lint cleanup (Ruff)",
+      "body": "**Why**: Improve readability, consistency, and CI signal.\n\n**Scope**: Run `ruff --fix`; resolve remaining violations by hand; add lint job in CI if missing.\n\n**Acceptance**:\n- `ruff check .` passes clean.\n- Diffstat attached in PR description.",
+      "labels": ["lint", "devx"],
+      "assignees": [],
+      "acceptance_criteria": [
+        "`ruff check .` passes clean.",
+        "Diffstat attached in PR description."
+      ]
+    },
+    {
+      "title": "P3 — Typecheck fix (mypy duplicate-module discovery)",
+      "body": "**Why**: Current layout makes mypy see modules twice, blocking typing in CI.\n\n**Scope**: Normalize import paths; ensure package `__init__.py` and mypy config (`--explicit-package-bases` or equivalent) agree.\n\n**Acceptance**:\n- `mypy .` runs to completion without duplicate-module errors.\n- Document chosen package layout in `ARCH_MAP.md`.",
+      "labels": ["typecheck", "devx"],
+      "assignees": [],
+      "acceptance_criteria": [
+        "`mypy .` runs to completion without duplicate-module errors.",
+        "Document chosen package layout in ARCH_MAP.md."
+      ]
+    },
+    {
+      "title": "P4 — Threat-model guardrails enforcement (ops & secrets)",
+      "body": "**Why**: Ensure privilege boundaries hold and secrets never leak in logs.\n\n**Scope**: Verify staff-only ops (`!health`, `!reload`, etc.) are gated; redact tokens/SA JSON everywhere; log denials explicitly.\n\n**Acceptance**:\n- Negative tests for non-staff users.\n- Grep logs show no secret material; denial events recorded.",
+      "labels": ["threat-model", "security", "area:ops"],
+      "assignees": [],
+      "acceptance_criteria": [
+        "Negative tests for non-staff users.",
+        "Grep logs show no secret material; denial events recorded."
+      ]
+    },
+    {
+      "title": "P4 — Architecture stabilization toward carve-out parity",
+      "body": "**Why**: Prepare clean seams for future splits and testing.\n\n**Scope**: Stabilize boundaries: Config adapter, Claims service, Praise publisher, Shard service, centralized Audit. Align helper utilities with Reminder bot to avoid drift.\n\n**Acceptance**:\n- Minimal interface stubs in place; unit tests for Claims service exist.\n- `ARCH_MAP.md` updated to reflect boundaries.",
+      "labels": ["architecture", "area:claims", "area:shards", "devx"],
+      "assignees": [],
+      "acceptance_criteria": [
+        "Minimal interface stubs in place; unit tests for Claims service exist.",
+        "ARCH_MAP.md updated to reflect boundaries."
+      ]
+    }
+  ]
+}
 
