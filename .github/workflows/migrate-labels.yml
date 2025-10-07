@@ -3,7 +3,7 @@ name: Migrate area:* → bot:* + comp:*
 on:
   workflow_dispatch:
     inputs:
-      bot_label: bot:achievements
+      bot_label:
         description: "bot:* label to apply (leave blank to auto-detect from repo name)"
         required: false
         default: ""
