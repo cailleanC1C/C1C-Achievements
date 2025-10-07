@@ -100,31 +100,6 @@
   color: "cccccc"
   description: Mirrors P3/P4
 
-# ===== Area labels (where it belongs) =====
-- name: area:reminder
-  color: "0052cc"
-  description: Reminder bot / scheduler / modes
-
-- name: area:welcomecrew
-  color: "0052cc"
-  description: WelcomeCrew bot / onboarding / tickets
-
-- name: area:matchmaker
-  color: "0052cc"
-  description: Matchmaker bot / placement / recruiters
-
-- name: area:claims
-  color: "0052cc"
-  description: Claims/Achievements bot
-
-- name: area:shards
-  color: "0052cc"
-  description: Shard OCR & mercy tracking modules
-
-- name: area:ops
-  color: "0052cc"
-  description: Shared ops/health/digest/reload contract
-
 # ===== Workflow helpers =====
 - name: needs:triage
   color: "fef2c0"
@@ -211,4 +186,3 @@
 - name: comp:ops-contract
   color: "6f42c1"
   description: Shared ops parity: ping/health/digest/reload
-
