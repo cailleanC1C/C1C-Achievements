@@ -1,4 +1,4 @@
-# C1C Achievement Bot v1.0.1
+# C1C Achievement Bot v1.0.3
 
 A Discord bot for the C1C cluster that **celebrates member achievements and milestones**.
 It automatically posts **warm, styled shout-outs** when specific roles are granted, keeps #levels tidy by grouping multiple unlocks, and gives Guardian Knights tools to process screenshot claims without flooding chat.
