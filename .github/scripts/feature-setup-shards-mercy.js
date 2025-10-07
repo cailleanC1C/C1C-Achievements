@@ -1,7 +1,7 @@
 // Runs inside actions/github-script (github, context, core available)
 const { owner, repo } = context.repo;
 
-// ---- Prefilled content (edit if needed) ----
+// ---- Prefilled content ----
 const feature = {
   title: 'Achievements - Shards & Mercy (v1)',
   bot: 'bot:achievements',
@@ -38,7 +38,7 @@ const feature = {
     'Sheets writes are idempotent/retried; no double-writes on rapid updates'
   ]
 };
-// --------------------------------------------
+// ---------------------------
 
 const epicTitle = `[Feature] ${feature.title}`;
 
