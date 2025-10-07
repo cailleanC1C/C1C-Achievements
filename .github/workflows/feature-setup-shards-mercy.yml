@@ -12,7 +12,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/github-script@v7
+      - name: Run prefilled setup script
+        uses: actions/github-script@v7
         with:
-          script-path: .github/scripts/feature-setup-shards-mercy.js
-
+          script: |
+            const fs = require('fs');
+            const path = '.github/scripts/feature-setup-shards-mercy.js';
+            const code = fs.readFileSync(path, 'utf8');
+            // Execute the file as an async function so top-level awaits work
+            const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+            const run = new AsyncFunction('github','context','core', code);
+            await run(github, context, core);
