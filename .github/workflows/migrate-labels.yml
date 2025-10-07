@@ -1,0 +1,82 @@
+name: Migrate area:* → bot:* + comp:*
+
+on:
+  workflow_dispatch:
+    inputs:
+      bot_label:
+        description: "Which bot:* label to apply for this repo"
+        required: true
+        type: choice
+        options:
+          - bot:reminder
+          - bot:welcomecrew
+          - bot:matchmaker
+          - bot:achievements
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Run migration
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const BOT_LABEL = core.getInput('bot_label'); // e.g., "bot:achievements"
+            const { owner, repo } = context.repo;
+
+            // Map old labels → new labels to add (in addition to BOT_LABEL)
+            const map = new Map([
+              ['area:reminder',       ['bot:reminder']],
+              ['area:welcomecrew',    ['bot:welcomecrew']],
+              ['area:matchmaker',     ['bot:matchmaker']],
+              ['area:achievements',   ['bot:achievements']],
+              ['area:claims',         ['bot:achievements']],   // historical alias
+              ['areaclaims',          ['bot:achievements']],   // historical alias
+              ['area:shards',         ['comp:shards']],
+              ['areashards',          ['comp:shards']],        // historical alias
+              ['area:ops',            ['comp:ops-contract']],
+              ['areaops',             ['comp:ops-contract']],  // historical alias
+            ]);
+
+            // Fetch all issues + PRs (open + closed) with pagination
+            const items = await github.paginate(
+              github.rest.issues.listForRepo,
+              { owner, repo, state: 'all', per_page: 100 }
+            );
+
+            let changed = 0, scanned = 0;
+
+            for (const it of items) {
+              scanned++;
+              const current = (it.labels || []).map(l => (typeof l === 'string' ? l : l.name));
+              const set = new Set(current);
+
+              // Ensure a bot:* label exists; add the chosen one if missing
+              if (![...set].some(n => n && n.startsWith('bot:'))) {
+                set.add(BOT_LABEL);
+              }
+
+              // Replace any mapped area labels
+              let didReplace = false;
+              for (const [oldName, addList] of map.entries()) {
+                if (set.has(oldName)) {
+                  set.delete(oldName);
+                  addList.forEach(n => set.add(n));
+                  didReplace = true;
+                }
+              }
+
+              // If nothing changed, skip
+              if (!didReplace) continue;
+
+              await github.rest.issues.setLabels({
+                owner, repo, issue_number: it.number, labels: [...set]
+              });
+              changed++;
+            }
+
+            core.notice(`Scanned ${scanned} items; updated ${changed}.`);
