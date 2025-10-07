@@ -3,15 +3,19 @@ name: Migrate area:* → bot:* + comp:*
 on:
   workflow_dispatch:
     inputs:
-      bot_label:
-        description: "Which bot:* label to apply for this repo"
-        required: true
+      bot_label: bot:achievements
+        description: "bot:* label to apply (leave blank to auto-detect from repo name)"
+        required: false
+        default: ""
+        type: string
+      state:
+        description: "Which items to migrate"
+        required: false
+        default: "open"
         type: choice
         options:
-          - bot:reminder
-          - bot:welcomecrew
-          - bot:matchmaker
-          - bot:achievements
+          - open
+          - all
 
 jobs:
   migrate:
@@ -25,10 +29,30 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const BOT_LABEL = core.getInput('bot_label'); // e.g., "bot:achievements"
+            const inputBot = (core.getInput('bot_label') || '').trim();
+            const state = core.getInput('state') || 'open';
             const { owner, repo } = context.repo;
 
-            // Map old labels → new labels to add (in addition to BOT_LABEL)
+            // Auto-detect bot:* from repo name when input is empty
+            function detectBotLabel(repoName) {
+              const r = repoName.toLowerCase();
+              if (r.includes('reminder'))    return 'bot:reminder';
+              if (r.includes('welcome'))     return 'bot:welcomecrew';
+              if (r.includes('match'))       return 'bot:matchmaker';
+              if (r.includes('achiev') ||
+                  r.includes('claim')  ||
+                  r.includes('shard'))       return 'bot:achievements';
+              return null;
+            }
+
+            let BOT_LABEL = inputBot || detectBotLabel(repo);
+            const allowed = new Set(['bot:reminder','bot:welcomecrew','bot:matchmaker','bot:achievements']);
+            if (!BOT_LABEL || !allowed.has(BOT_LABEL)) {
+              core.setFailed(`Could not determine a valid bot label. Got '${BOT_LABEL ?? ''}'. Pass workflow input 'bot_label' explicitly (one of ${[...allowed].join(', ')}).`);
+              return;
+            }
+
+            // Map old area labels → new labels to add (besides the bot label)
             const map = new Map([
               ['area:reminder',       ['bot:reminder']],
               ['area:welcomecrew',    ['bot:welcomecrew']],
@@ -42,36 +66,43 @@ jobs:
               ['areaops',             ['comp:ops-contract']],  // historical alias
             ]);
 
-            // Fetch all issues + PRs (open + closed) with pagination
+            // Helper: safe add (no blanks)
+            const addIfValid = (set, name) => {
+              if (typeof name === 'string') {
+                const v = name.trim();
+                if (v.length > 0) set.add(v);
+              }
+            };
+
+            // Fetch all issues/PRs with pagination
             const items = await github.paginate(
               github.rest.issues.listForRepo,
-              { owner, repo, state: 'all', per_page: 100 }
+              { owner, repo, state, per_page: 100 }
             );
 
             let changed = 0, scanned = 0;
 
             for (const it of items) {
               scanned++;
-              const current = (it.labels || []).map(l => (typeof l === 'string' ? l : l.name));
+              const current = (it.labels || []).map(l => typeof l === 'string' ? l : l.name).filter(Boolean);
               const set = new Set(current);
 
-              // Ensure a bot:* label exists; add the chosen one if missing
-              if (![...set].some(n => n && n.startsWith('bot:'))) {
-                set.add(BOT_LABEL);
+              // Ensure exactly one bot:* (if none present, add the chosen one)
+              if (![...set].some(n => typeof n === 'string' && n.startsWith('bot:'))) {
+                addIfValid(set, BOT_LABEL);
               }
 
-              // Replace any mapped area labels
+              // Replace mapped area:* labels
               let didReplace = false;
               for (const [oldName, addList] of map.entries()) {
                 if (set.has(oldName)) {
                   set.delete(oldName);
-                  addList.forEach(n => set.add(n));
+                  for (const n of addList) addIfValid(set, n);
                   didReplace = true;
                 }
               }
 
-              // If nothing changed, skip
-              if (!didReplace) continue;
+              if (!didReplace) continue; // nothing to do
 
               await github.rest.issues.setLabels({
                 owner, repo, issue_number: it.number, labels: [...set]
@@ -79,4 +110,4 @@ jobs:
               changed++;
             }
 
-            core.notice(`Scanned ${scanned} items; updated ${changed}.`);
+            core.notice(`Scanned ${scanned} items; updated ${changed}. BOT_LABEL=${BOT_LABEL}, state=${state}`);
