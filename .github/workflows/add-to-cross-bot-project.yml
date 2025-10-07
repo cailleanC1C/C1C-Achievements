@@ -1,0 +1,21 @@
+name: Add issues to Cross-Bot Hotlist
+
+on:
+  workflow_dispatch: {}
+  issues:
+    types: [opened, labeled, reopened, edited]
+
+permissions:
+  contents: read
+  issues: read
+  projects: write
+
+jobs:
+  add:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add to org project
+        uses: actions/add-to-project@v1
+        with:
+          project-url: https://github.com/orgs/cailleanC1C/projects/1
+          github-token: ${{ secrets.GITHUB_TOKEN }}
