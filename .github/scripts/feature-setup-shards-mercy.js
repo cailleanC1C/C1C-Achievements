@@ -3,7 +3,7 @@ const { owner, repo } = context.repo;
 
 // <<< EDIT THESE 2 LINES TO MATCH YOUR PROJECT >>>
 const PROJECT_OWNER = 'cailleanC1C';   // user login (because this is a user project)
-const PROJECT_NUMBER =  /* <-- put the number from the URL, e.g. 5 */  5;
+const PROJECT_NUMBER = 1 /* <-- put the number from the URL, e.g. 5 */  ;
 // ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 // ---- Prefilled content for this feature ----
