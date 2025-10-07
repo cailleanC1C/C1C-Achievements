@@ -11,7 +11,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PROJECTS_TOKEN }}
           PROJECT_OWNER: cailleanC1C
-          PROJECT_NUMBER: <PROJECT_NUMBER>   # <-- just the number, e.g. 5 (no quotes)
+          PROJECT_NUMBER: 1   # <-- just the number, e.g. 5 (no quotes)
           ISSUE_NODE_ID: ${{ github.event.issue.node_id }}
           ISSUE_LABELS_JSON: ${{ toJson(github.event.issue.labels) }}
         run: |
