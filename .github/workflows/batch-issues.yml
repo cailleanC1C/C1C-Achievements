@@ -14,9 +14,36 @@ jobs:
     permissions:
       issues: write
       contents: read
+
     steps:
       - uses: actions/checkout@v4
-      
+
+      - name: Ensure jq & yq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq yq
+
+      - name: Validate input file exists
+        id: pick
+        run: |
+          FILE="${{ github.event.inputs.file }}"
+          if [ ! -f "$FILE" ]; then
+            echo "File not found: $FILE" >&2
+            exit 1
+          fi
+          echo "file=$FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Normalize issues file to JSON
+        run: |
+          FILE="${{ steps.pick.outputs.file }}"
+          case "$FILE" in
+            *.yml|*.yaml) yq -o=json "$FILE" > issues.json ;;
+            *.json) cp "$FILE" issues.json ;;
+            *) echo "Unsupported file type: $FILE" >&2; exit 1 ;;
+          esac
+          echo "Normalized count:"
+          jq 'length' issues.json
+
       - name: Create labels and issues (GitHub API)
         uses: actions/github-script@v7
         with:
@@ -70,9 +97,10 @@ jobs:
             for (const name of allLabels) {
               try {
                 await github.rest.issues.createLabel({ ...repo, name, color: "cccccc", description: name });
-                core.info(`Created/exists: ${name}`);
+                core.info(`Created label: ${name}`);
               } catch (e) {
-                if (e.status !== 422) core.warning(`Label "${name}" error: ${e.message}`);
+                if (e.status === 422) core.info(`Label exists: ${name}`);
+                else core.warning(`Label "${name}" error: ${e.message}`);
               }
             }
 
