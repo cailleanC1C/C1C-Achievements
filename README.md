@@ -16,7 +16,7 @@ It automatically posts **warm, styled shout-outs** when specific roles are grant
 
 --- 
 
-## What’s new in v1.0.x
+## What’s new in v1.0.3
 
 * **Shared OpsCommands** introduced: all bots now use scoped prefixes for health, digest, reload, etc.
 * **Appreciation logic refined**: multiple role grants in a short window become one combined message.
