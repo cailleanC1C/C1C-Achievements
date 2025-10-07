@@ -1,0 +1,120 @@
+name: Feature Setup — Shards & Mercy (one-shot)
+
+on:
+  workflow_dispatch: {}   # no inputs; just click Run
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  make:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create Epic + sub-issues (prefilled)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+
+            // ---------- PREFILLED CONTENT (edit if you need tweaks) ----------
+            const feature = {
+              title: "Achievements — Shards & Mercy (v1)",
+              bot: "bot:achievements",
+              comp: "comp:shards",
+              summary: `Add a clan-aware Shards & Mercy module to Achievements: users drop a shard-count screenshot in their clan’s shard thread; the bot OCRs counts (with manual fallback), stores inventory + events in Sheets, tracks mercy per shard type, and keeps a pinned weekly summary message per clan.`,
+              problem: `Leads/recruiters lack a reliable, up-to-date shard inventory and pity ledger; screenshots are scattered and mercy math is error-prone. We want a fast, thread-native flow that produces a trustworthy ledger and a clean weekly summary.`,
+              useCases: [
+                "Player posts screenshot → bot reads five shard counts → user confirms → snapshot saved",
+                "Track mercy per user per shard type; reset correctly on Legendary (incl. Guaranteed/Extra rules)",
+                "Users/staff can set initial mercy or reset manually; never block UX if OCR fails",
+                "Keep exactly one pinned summary per clan; update within ISO week; new message on week rollover",
+                "All actions live in clan shard threads; permissions tied to clan roles"
+              ],
+              subtasks: [
+                "Guards & config",
+                "Sheets adapters",
+                "Watcher (OCR/manual)",
+                "Commands & UI",
+                "Mercy engine & ledger",
+                "Summary renderer (weekly pinned)",
+                "Concurrency & rate limits",
+                "Validation & staff tools"
+              ],
+              acceptance: [
+                "Posting an image in a clan shard thread offers Scan Image; preview shows five counts; Confirm writes a snapshot row with timestamp and message link",
+                "If OCR can’t read confidently, Manual entry saves counts; UX never blocks",
+                "mercy addpulls records batch with shard type/qty/flags; Legendary pulls reset correct mercy counters; Guaranteed/Extra Legendary follow rules",
+                "Users/staff can set initial mercy or reset via command; changes persist",
+                "Exactly one pinned This Week summary per clan; edits within week update it; new week creates a new message",
+                "Summary shows totals, paged member list (stable sort by name then ID), last updated time",
+                "Actions limited to configured shard threads; clan role checks; staff override works",
+                "Sheets writes are idempotent/retried; no double-writes on rapid updates"
+              ]
+            };
+            // ------------------------------------------------------------------
+
+            const labelsEpic = ["feature", feature.bot, feature.comp];
+
+            const bullets = feature.useCases.map(u => `- ${u}`).join("\n");
+            const plan    = feature.subtasks.map(s => `- [ ] ${s}`).join("\n");
+            const acc     = feature.acceptance.map(a => `- [ ] ${a}`).join("\n");
+
+            const epicBody = `
+### Summary
+${feature.summary}
+
+### Problem / goal
+${feature.problem}
+
+### Core use cases (v1)
+${bullets}
+
+### High-level design (agreed)
+- Module: ${feature.bot} / ${feature.comp}
+- Data: snapshots (inventory) + events (pull ledger)
+- Commands/UI: modal/commands; weekly summary rules
+- Guards/ops: thread-only, role gating, retries/backoff
+
+### Implementation plan (v1 steps)
+${plan}
+
+### Acceptance criteria (testable)
+${acc}
+
+### Rollout
+Dry-run in 1–2 clans; staff override; fallback = manual entry only.
+`.trim();
+
+            // Create the Epic
+            const epic = await github.rest.issues.create({
+              owner, repo,
+              title: `[Feature] ${feature.title}`,
+              labels: labelsEpic,
+              body: epicBody
+            });
+            const epicNum = epic.data.number;
+
+            // Create sub-issues (Watcher → comp:ocr; others → comp:shards)
+            const linkLines = [];
+            for (const s of feature.subtasks) {
+              const compForSub = /watcher|ocr/i.test(s) ? "comp:ocr" : feature.comp;
+              const sub = await github.rest.issues.create({
+                owner, repo,
+                title: `[Feature] ${s} — ${feature.title}`,
+                labels: ["feature", feature.bot, compForSub],
+                body: `Split from #${epicNum}`
+              });
+              linkLines.push(`- [ ] ${s} (#${sub.data.number})`);
+            }
+
+            // Append checklist of sub-issues back to the Epic
+            const updatedBody = `${epic.data.body}\n\n### Sub-issues\n${linkLines.join("\n")}`;
+            await github.rest.issues.update({ owner, repo, issue_number: epicNum, body: updatedBody });
+
+            core.summary
+              .addHeading('Shards & Mercy — Feature setup created')
+              .addRaw(`Epic: #${epicNum}\n\n${linkLines.join("\n")}`)
+              .write();
+
+            console.log(`Epic #${epicNum} created.`, linkLines.join(" | "));
