@@ -14,79 +14,77 @@ jobs:
           github-token: ${{ secrets.PROJECTS_TOKEN }}
 
       - name: Set Priority field from P* label
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.PROJECTS_TOKEN }}
-          script: |
-            const PROJECT_OWNER = 'cailleanC1C';
-            const PROJECT_NUMBER = <PROJECT_NUMBER>;
+        env:
+          GH_TOKEN: ${{ secrets.PROJECTS_TOKEN }}
+          PROJECT_OWNER: cailleanC1C
+          PROJECT_NUMBER: "<PROJECT_NUMBER>"
+          ISSUE_NODE_ID: ${{ github.event.issue.node_id }}
+          ISSUE_LABELS_JSON: ${{ toJson(github.event.issue.labels) }}
+        run: |
+          set -euo pipefail
 
-            const labels = (github.event.issue.labels || []).map(l => typeof l === 'string' ? l : l.name);
-            const priority = ['P0','P1','P2','P3','P4'].find(p => labels.includes(p));
-            if (!priority) {
-              core.info('No P* label on this issue; skipping Priority update.');
-              return;
-            }
+          # 1) Determine P* from labels
+          PRIORITY=$(printf '%s' "$ISSUE_LABELS_JSON" | jq -r 'map(.name) | map(select(test("^P[0-4]$"))) | first // empty')
+          if [ -z "$PRIORITY" ]; then
+            echo "No P* label; skipping Priority update."
+            exit 0
+          fi
+          echo "Detected priority: $PRIORITY"
 
-            const issueNodeId = github.event.issue.node_id;
-
-            // 1) Fetch project + Priority field + options
-            const proj = await github.graphql(`
-              query($owner:String!, $number:Int!) {
-                user(login:$owner) {
-                  projectV2(number:$number) {
-                    id
-                    fields(first:50) {
-                      nodes {
-                        ... on ProjectV2SingleSelectField {
-                          id
-                          name
-                          options { id name }
-                        }
+          # 2) Fetch project + Priority field + options
+          PROJ_JSON=$(gh api graphql -f owner="$PROJECT_OWNER" -F number="$PROJECT_NUMBER" -f query='
+            query($owner:String!, $number:Int!) {
+              user(login:$owner) {
+                projectV2(number:$number) {
+                  id
+                  fields(first:50) {
+                    nodes {
+                      ... on ProjectV2SingleSelectField {
+                        id
+                        name
+                        options { id name }
                       }
                     }
                   }
                 }
               }
-            `, { owner: PROJECT_OWNER, number: PROJECT_NUMBER });
+            }')
+          PROJECT_ID=$(jq -r '.data.user.projectV2.id' <<<"$PROJ_JSON")
+          FIELD_ID=$(jq -r '.data.user.projectV2.fields.nodes[] | select(.name=="Priority") | .id' <<<"$PROJ_JSON")
+          OPTION_ID=$(jq -r --arg P "$PRIORITY" '.data.user.projectV2.fields.nodes[] | select(.name=="Priority") | .options[] | select(.name==$P) | .id' <<<"$PROJ_JSON")
 
-            const project = proj.user?.projectV2;
-            if (!project) core.setFailed('Project not found.');
+          if [ -z "$PROJECT_ID" ] || [ -z "$FIELD_ID" ] || [ -z "$OPTION_ID" ]; then
+            echo "Could not resolve project/field/option ids"; exit 1
+          fi
 
-            const field = project.fields.nodes.find(f => f?.name === 'Priority');
-            if (!field) core.setFailed('Priority field not found on project.');
-
-            const opt = field.options.find(o => o.name === priority);
-            if (!opt) core.setFailed(`Priority option ${priority} not found.`);
-
-            // 2) Ensure item exists in the project, get the item ID
-            const existing = await github.graphql(`
-              query($id:ID!) {
-                node(id:$id) {
-                  ... on Issue {
-                    projectItems(first:50, includeArchived:false) {
-                      nodes { id project { id } }
-                    }
+          # 3) Ensure the item exists in the project; get item id
+          ITEMS_JSON=$(gh api graphql -F id="$ISSUE_NODE_ID" -f query='
+            query($id:ID!) {
+              node(id:$id) {
+                ... on Issue {
+                  projectItems(first:50, includeArchived:false) {
+                    nodes { id project { id } }
                   }
                 }
               }
-            `, { id: issueNodeId });
+            }')
+          ITEM_ID=$(jq -r --arg PID "$PROJECT_ID" '.data.node.projectItems.nodes[] | select(.project.id==$PID) | .id' <<<"$ITEMS_JSON")
 
-            let itemId = existing.node.projectItems.nodes.find(n => n.project.id === project.id)?.id;
+          if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
+            ADD_JSON=$(gh api graphql -F projectId="$PROJECT_ID" -F contentId="$ISSUE_NODE_ID" -f query='
+              mutation($projectId:ID!, $contentId:ID!) {
+                addProjectV2ItemById(input:{projectId:$projectId, contentId:$contentId}) { item { id } }
+              }')
+            ITEM_ID=$(jq -r '.data.addProjectV2ItemById.item.id' <<<"$ADD_JSON")
+          fi
 
-            if (!itemId) {
-              const addRes = await github.graphql(`
-                mutation($projectId:ID!, $contentId:ID!) {
-                  addProjectV2ItemById(input:{projectId:$projectId, contentId:$contentId}) {
-                    item { id }
-                  }
-                }
-              `, { projectId: project.id, contentId: issueNodeId });
-              itemId = addRes.addProjectV2ItemById.item.id;
-            }
-
-            // 3) Set the Priority single-select value
-            await github.graphql(`
+          # 4) Set the Priority value
+          gh api graphql \
+            -F projectId="$PROJECT_ID" \
+            -F itemId="$ITEM_ID" \
+            -F fieldId="$FIELD_ID" \
+            -F optionId="$OPTION_ID" \
+            -f query='
               mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $optionId:String!) {
                 updateProjectV2ItemFieldValue(input:{
                   projectId:$projectId,
@@ -94,8 +92,5 @@ jobs:
                   fieldId:$fieldId,
                   value:{ singleSelectOptionId:$optionId }
                 }) { clientMutationId }
-              }
-            `, { projectId: project.id, itemId, fieldId: field.id, optionId: opt.id });
-
-            core.info(`Priority set to ${priority}.`);
-
+              }'
+          echo "Priority updated to $PRIORITY."
