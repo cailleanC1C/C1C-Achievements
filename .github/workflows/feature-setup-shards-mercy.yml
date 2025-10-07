@@ -1,7 +1,7 @@
-name: Feature Setup — Shards & Mercy (one-shot)
+name: Feature Setup - Shards & Mercy (one-shot)
 
 on:
-  workflow_dispatch: {}   # no inputs; just click Run
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -11,21 +11,21 @@ jobs:
   make:
     runs-on: ubuntu-latest
     steps:
-      - name: Create Epic + sub-issues (prefilled)
+      - name: Create Epic and sub-issues (prefilled)
         uses: actions/github-script@v7
         with:
           script: |
             const { owner, repo } = context.repo;
 
-            // ---------- PREFILLED CONTENT (edit if you need tweaks) ----------
+            // Prefilled content
             const feature = {
-              title: "Achievements — Shards & Mercy (v1)",
+              title: "Achievements - Shards & Mercy (v1)",
               bot: "bot:achievements",
               comp: "comp:shards",
-              summary: `Add a clan-aware Shards & Mercy module to Achievements: users drop a shard-count screenshot in their clan’s shard thread; the bot OCRs counts (with manual fallback), stores inventory + events in Sheets, tracks mercy per shard type, and keeps a pinned weekly summary message per clan.`,
-              problem: `Leads/recruiters lack a reliable, up-to-date shard inventory and pity ledger; screenshots are scattered and mercy math is error-prone. We want a fast, thread-native flow that produces a trustworthy ledger and a clean weekly summary.`,
+              summary: "Add a clan-aware Shards & Mercy module to Achievements: users drop a shard-count screenshot in their clan's shard thread; the bot OCRs counts (with manual fallback), stores inventory and events in Sheets, tracks mercy per shard type, and keeps a pinned weekly summary message per clan.",
+              problem: "Leads and recruiters lack a reliable, up-to-date shard inventory and pity ledger; screenshots are scattered and mercy math is error-prone. We want a fast, thread-native flow that produces a trustworthy ledger and a clean weekly summary.",
               useCases: [
-                "Player posts screenshot → bot reads five shard counts → user confirms → snapshot saved",
+                "Player posts screenshot -> bot reads five shard counts -> user confirms -> snapshot saved",
                 "Track mercy per user per shard type; reset correctly on Legendary (incl. Guaranteed/Extra rules)",
                 "Users/staff can set initial mercy or reset manually; never block UX if OCR fails",
                 "Keep exactly one pinned summary per clan; update within ISO week; new message on week rollover",
@@ -43,7 +43,7 @@ jobs:
               ],
               acceptance: [
                 "Posting an image in a clan shard thread offers Scan Image; preview shows five counts; Confirm writes a snapshot row with timestamp and message link",
-                "If OCR can’t read confidently, Manual entry saves counts; UX never blocks",
+                "If OCR cannot read confidently, Manual entry saves counts; UX never blocks",
                 "mercy addpulls records batch with shard type/qty/flags; Legendary pulls reset correct mercy counters; Guaranteed/Extra Legendary follow rules",
                 "Users/staff can set initial mercy or reset via command; changes persist",
                 "Exactly one pinned This Week summary per clan; edits within week update it; new week creates a new message",
@@ -52,7 +52,17 @@ jobs:
                 "Sheets writes are idempotent/retried; no double-writes on rapid updates"
               ]
             };
-            // ------------------------------------------------------------------
+
+            const epicTitle = `[Feature] ${feature.title}`;
+
+            // Idempotency: skip if epic already exists
+            const found = await github.rest.search.issuesAndPullRequests({
+              q: `repo:${owner}/${repo} is:issue in:title "${epicTitle}"`
+            });
+            if (found.data.total_count > 0) {
+              core.notice(`Epic already exists (#${found.data.items[0].number}). Skipping.`);
+              return;
+            }
 
             const labelsEpic = ["feature", feature.bot, feature.comp];
 
@@ -60,8 +70,8 @@ jobs:
             const plan    = feature.subtasks.map(s => `- [ ] ${s}`).join("\n");
             const acc     = feature.acceptance.map(a => `- [ ] ${a}`).join("\n");
 
-            const epicBody = `
-### Summary
+            const epicBody =
+`### Summary
 ${feature.summary}
 
 ### Problem / goal
@@ -83,38 +93,32 @@ ${plan}
 ${acc}
 
 ### Rollout
-Dry-run in 1–2 clans; staff override; fallback = manual entry only.
-`.trim();
+Dry-run in 1-2 clans; staff override; fallback = manual entry only.`;
 
-            // Create the Epic
+            // Create Epic
             const epic = await github.rest.issues.create({
-              owner, repo,
-              title: `[Feature] ${feature.title}`,
-              labels: labelsEpic,
-              body: epicBody
+              owner, repo, title: epicTitle, labels: labelsEpic, body: epicBody
             });
             const epicNum = epic.data.number;
 
-            // Create sub-issues (Watcher → comp:ocr; others → comp:shards)
-            const linkLines = [];
+            // Sub-issues (Watcher -> comp:ocr; others -> main comp)
+            const links = [];
             for (const s of feature.subtasks) {
               const compForSub = /watcher|ocr/i.test(s) ? "comp:ocr" : feature.comp;
+              const subTitle = `[Feature] ${s} - ${feature.title}`;
               const sub = await github.rest.issues.create({
-                owner, repo,
-                title: `[Feature] ${s} — ${feature.title}`,
+                owner, repo, title: subTitle,
                 labels: ["feature", feature.bot, compForSub],
                 body: `Split from #${epicNum}`
               });
-              linkLines.push(`- [ ] ${s} (#${sub.data.number})`);
+              links.push(`- [ ] ${s} (#${sub.data.number})`);
             }
 
-            // Append checklist of sub-issues back to the Epic
-            const updatedBody = `${epic.data.body}\n\n### Sub-issues\n${linkLines.join("\n")}`;
-            await github.rest.issues.update({ owner, repo, issue_number: epicNum, body: updatedBody });
+            await github.rest.issues.update({
+              owner, repo, issue_number: epicNum,
+              body: `${epic.data.body}\n\n### Sub-issues\n${links.join("\n")}`
+            });
 
-            core.summary
-              .addHeading('Shards & Mercy — Feature setup created')
-              .addRaw(`Epic: #${epicNum}\n\n${linkLines.join("\n")}`)
+            core.summary.addHeading("Feature setup created")
+              .addRaw(`Epic: #${epicNum}\n\n${links.join("\n")}`)
               .write();
-
-            console.log(`Epic #${epicNum} created.`, linkLines.join(" | "));
