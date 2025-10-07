@@ -1,7 +1,12 @@
-// Runs inside actions/github-script (github, context, core available)
+// Runs inside actions/github-script with PAT auth (github, context, core available)
 const { owner, repo } = context.repo;
 
-// ---- Prefilled content ----
+// <<< EDIT THESE 2 LINES TO MATCH YOUR PROJECT >>>
+const PROJECT_OWNER = 'cailleanC1C';   // user login (because this is a user project)
+const PROJECT_NUMBER =  /* <-- put the number from the URL, e.g. 5 */  5;
+// ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+// ---- Prefilled content for this feature ----
 const feature = {
   title: 'Achievements - Shards & Mercy (v1)',
   bot: 'bot:achievements',
@@ -38,79 +43,133 @@ const feature = {
     'Sheets writes are idempotent/retried; no double-writes on rapid updates'
   ]
 };
-// ---------------------------
+// --------------------------------------------
 
 const epicTitle = `[Feature] ${feature.title}`;
 
-// Idempotency: skip if epic already exists
-const search = await github.rest.search.issuesAndPullRequests({
+// --- helpers: project id + add item by content id ---
+async function getProjectId() {
+  const res = await github.graphql(
+    `
+    query($login:String!, $number:Int!) {
+      user(login:$login) { projectV2(number:$number) { id } }
+    }
+    `,
+    { login: PROJECT_OWNER, number: PROJECT_NUMBER }
+  );
+  const pid = res?.user?.projectV2?.id;
+  if (!pid) throw new Error('Project not found; check PROJECT_OWNER/PROJECT_NUMBER.');
+  return pid;
+}
+
+async function addToProject(contentId) {
+  const projectId = await getProjectId();
+  await github.graphql(
+    `
+    mutation($projectId:ID!, $contentId:ID!) {
+      addProjectV2ItemById(input:{projectId:$projectId, contentId:$contentId}) { item { id } }
+    }
+    `,
+    { projectId, contentId }
+  );
+}
+
+async function ensureInProjectByNumber(number) {
+  const issue = await github.rest.issues.get({ owner, repo, issue_number: number });
+  await addToProject(issue.data.node_id);
+}
+
+// --- 1) create Epic if missing (else reuse) ---
+let epicNum;
+let epicNodeId;
+
+const searchEpic = await github.rest.search.issuesAndPullRequests({
   q: `repo:${owner}/${repo} is:issue in:title "${epicTitle}"`
 });
-if (search.data.total_count > 0) {
-  const existing = search.data.items[0];
-  core.notice(`Epic already exists (#${existing.number}). Skipping creation.`);
-  return;
+
+if (searchEpic.data.total_count > 0) {
+  const existing = searchEpic.data.items[0];
+  epicNum = existing.number;
+  // fetch full issue to get node_id reliably
+  const full = await github.rest.issues.get({ owner, repo, issue_number: epicNum });
+  epicNodeId = full.data.node_id;
+} else {
+  const labelsEpic = ['feature', feature.bot, feature.comp];
+  const bullets = feature.useCases.map(u => `- ${u}`).join('\n');
+  const plan    = feature.subtasks.map(s => `- [ ] ${s}`).join('\n');
+  const acc     = feature.acceptance.map(a => `- [ ] ${a}`).join('\n');
+
+  const epicBody = [
+    '### Summary',
+    feature.summary,
+    '',
+    '### Problem / goal',
+    feature.problem,
+    '',
+    '### Core use cases (v1)',
+    bullets,
+    '',
+    '### High-level design (agreed)',
+    `- Module: ${feature.bot} / ${feature.comp}`,
+    '- Data: snapshots (inventory) + events (pull ledger)',
+    '- Commands/UI: modal/commands; weekly summary rules',
+    '- Guards/ops: thread-only, role gating, retries/backoff',
+    '',
+    '### Implementation plan (v1 steps)',
+    plan,
+    '',
+    '### Acceptance criteria (testable)',
+    acc,
+    '',
+    '### Rollout',
+    'Dry-run in 1-2 clans; staff override; fallback = manual entry only.'
+  ].join('\n');
+
+  const epic = await github.rest.issues.create({
+    owner, repo, title: epicTitle, labels: labelsEpic, body: epicBody
+  });
+  epicNum = epic.data.number;
+  epicNodeId = epic.data.node_id;
 }
 
-const labelsEpic = ['feature', feature.bot, feature.comp];
+// Add epic to project (works even if it was already there)
+await addToProject(epicNodeId);
 
-const bullets = feature.useCases.map(u => `- ${u}`).join('\n');
-const plan    = feature.subtasks.map(s => `- [ ] ${s}`).join('\n');
-const acc     = feature.acceptance.map(a => `- [ ] ${a}`).join('\n');
-
-const epicBody = [
-  '### Summary',
-  feature.summary,
-  '',
-  '### Problem / goal',
-  feature.problem,
-  '',
-  '### Core use cases (v1)',
-  bullets,
-  '',
-  '### High-level design (agreed)',
-  `- Module: ${feature.bot} / ${feature.comp}`,
-  '- Data: snapshots (inventory) + events (pull ledger)',
-  '- Commands/UI: modal/commands; weekly summary rules',
-  '- Guards/ops: thread-only, role gating, retries/backoff',
-  '',
-  '### Implementation plan (v1 steps)',
-  plan,
-  '',
-  '### Acceptance criteria (testable)',
-  acc,
-  '',
-  '### Rollout',
-  'Dry-run in 1-2 clans; staff override; fallback = manual entry only.'
-].join('\n');
-
-// Create Epic
-const epic = await github.rest.issues.create({
-  owner, repo, title: epicTitle, labels: labelsEpic, body: epicBody
-});
-const epicNum = epic.data.number;
-
-// Sub-issues (Watcher -> comp:ocr; others -> comp:shards)
+// --- 2) ensure sub-issues exist + add them to project ---
 const linkLines = [];
 for (const s of feature.subtasks) {
-  const isWatcher = /watcher|ocr/i.test(s);
-  const compForSub = isWatcher ? 'comp:ocr' : feature.comp;
-  const sub = await github.rest.issues.create({
-    owner, repo,
-    title: `[Feature] ${s} - ${feature.title}`,
-    labels: ['feature', feature.bot, compForSub],
-    body: `Split from #${epicNum}`
+  const subTitle = `[Feature] ${s} - ${feature.title}`;
+  let subNumber;
+
+  // find or create
+  const searchSub = await github.rest.search.issuesAndPullRequests({
+    q: `repo:${owner}/${repo} is:issue in:title "${subTitle}"`
   });
-  linkLines.push(`- [ ] ${s} (#${sub.data.number})`);
+  if (searchSub.data.total_count > 0) {
+    subNumber = searchSub.data.items[0].number;
+  } else {
+    const compForSub = /watcher|ocr/i.test(s) ? 'comp:ocr' : feature.comp;
+    const sub = await github.rest.issues.create({
+      owner, repo, title: subTitle,
+      labels: ['feature', feature.bot, compForSub],
+      body: `Split from #${epicNum}`
+    });
+    subNumber = sub.data.number;
+  }
+
+  await ensureInProjectByNumber(subNumber);
+  linkLines.push(`- [ ] ${s} (#${subNumber})`);
 }
 
-// Append checklist to Epic
-await github.rest.issues.update({
-  owner, repo, issue_number: epicNum,
-  body: `${epic.data.body}\n\n### Sub-issues\n${linkLines.join('\n')}`
-});
+// --- 3) update epic body with checklist of subs ---
+const epicFull = await github.rest.issues.get({ owner, repo, issue_number: epicNum });
+const alreadyHas = /### Sub-issues/.test(epicFull.data.body || '');
+const newBody = alreadyHas
+  ? epicFull.data.body
+  : `${epicFull.data.body}\n\n### Sub-issues\n${linkLines.join('\n')}`;
+await github.rest.issues.update({ owner, repo, issue_number: epicNum, body: newBody });
 
 core.summary
-  .addHeading('Feature setup created')
+  .addHeading('Feature setup created / backfilled')
   .addRaw(`Epic: #${epicNum}\n\n${linkLines.join('\n')}`)
   .write();
