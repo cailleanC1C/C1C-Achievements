@@ -16,6 +16,6 @@ jobs:
           github-token: ${{ secrets.PROJECTS_TOKEN }}  # PAT with project:write scope
           script: |
             const fs = require('fs');
-            const code = fs.readFileSync('.github/scripts/feature-setup-shards-mercy.full.js','utf8');
+            const code = fs.readFileSync('.github/scripts/feature-setup-shards-mercy.js','utf8');
             const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
             await new AsyncFunction('github','context','core', code)(github, context, core);
