@@ -1,5 +1,3 @@
-*** Begin Patch
-*** Add File: docs/ADR/ADR-002-shards-ux-manual-first.md
 # ADR-002 — Shards UX: Manual-first, OCR v2 postponed
 **Status:** Accepted • **Date:** 2025-10-08
 
@@ -13,4 +11,3 @@ Current OCR is inconsistent for big numbers; we need a reliable UX now.
 ## Consequences
 - Users bypass flaky OCR when needed.
 - Clear follow-up scope (token stitching, per-band OCR, richer debug).
-*** End Patch
