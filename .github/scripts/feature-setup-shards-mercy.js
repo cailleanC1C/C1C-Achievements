@@ -1,12 +1,14 @@
-// Feature generator (full): epic + rich child bodies + add to project (idempotent)
+// Feature generator (full): creates/updates Epic + rich child issues,
+// links them, and adds everything to your Project board (idempotent).
+
 const { owner, repo } = context.repo;
 
-// --- project selection (edit if needed) ---
+// ---- Project selection (edit if your board name/login differ) ----
 const PROJECT_OWNER = 'cailleanC1C';
-const PROJECT_TITLE = 'C1C Cross-Bot Hotlist';  // resolves by title to avoid number drift
-// ------------------------------------------
+const PROJECT_TITLE = 'C1C Cross-Bot Hotlist';
+// ------------------------------------------------------------------
 
-// feature definition (prefilled for Shards & Mercy)
+// ---- Feature definition (Shards & Mercy v1) ----
 const feature = {
   title: 'Achievements - Shards & Mercy (v1)',
   bot: 'bot:achievements',
@@ -18,31 +20,33 @@ const feature = {
     'Keep exactly one pinned summary per clan; update within ISO week; new message on week rollover',
     'All actions live in clan shard threads; permissions tied to clan roles'
   ],
-  epicBody: [
+  epicBodyIntro: [
     '### Summary',
     "Add a clan-aware Shards & Mercy module to Achievements: users drop a shard-count screenshot in their clan's shard thread; the bot OCRs counts (with manual fallback), stores inventory and events in Sheets, tracks mercy per shard type, and keeps a pinned weekly summary message per clan.",
     '',
     '### Problem / goal',
     'Leads/recruiters lack a reliable, up-to-date shard inventory and pity ledger; screenshots are scattered and mercy math is error-prone.',
     '',
-    '### Core use cases (v1)',
-    // bullets inserted below
+    '### Core use cases (v1)'
+  ],
+  epicBodyMiddle: [
     '',
     '### High-level design (agreed)',
-    `- Module: bot:achievements / comp:shards`,
+    '- Module: bot:achievements / comp:shards',
     '- Data: snapshots (inventory) + events (pull ledger)',
     '- Commands/UI: modal/commands; weekly summary rules',
     '- Guards/ops: thread-only, role gating, retries/backoff',
     '',
-    '### Implementation plan (v1 steps)',
-    // plan inserted below
+    '### Implementation plan (v1 steps)'
+  ],
+  epicBodyEnd: [
     '',
     '### Acceptance criteria (testable)',
     '- [ ] Image in shard thread -> Scan Image modal -> Confirm writes snapshot with message link & timestamp',
     '- [ ] Manual path works when OCR fails; UX never blocks',
     '- [ ] mercy addpulls records batch with shard type/qty/flags; Legendary/Guaranteed/Extra reset correctly',
     '- [ ] Staff can set initial pity or reset; changes persist',
-    '- [ ] Exactly one pinned “This Week” summary per clan; in-week updates edit; week rollover creates new',
+    '- [ ] Exactly one pinned "This Week" summary per clan; in-week updates edit; week rollover creates new',
     '',
     '### Rollout',
     'Dry-run in 1–2 clans; keep manual entry available; simple rollback: disable watcher, leave commands.'
@@ -50,7 +54,7 @@ const feature = {
   subs: [
     { key: 'Guards & config', comp: 'comp:shards', body: [
       '### Scope',
-      'Map role_id ⇄ clan_tag, thread-only gates, staff override toggles.',
+      'Map role_id <-> clan_tag, thread-only gates, staff override toggles.',
       '',
       '### Tasks',
       '- Config: clan_tag, thread_id, emoji ids, page_size, enable_ocr, enable_pinned_summary.',
@@ -71,7 +75,7 @@ const feature = {
       '- Idempotency: (message_link+user+clan) for snapshots; (batch_id+index) for events.',
       '',
       '### Acceptance',
-      '- Re-submits don’t duplicate rows.',
+      '- Re-submits do not duplicate rows.',
       '- Schema documented inline.'
     ]},
     { key: 'Watcher (OCR/manual)', comp: 'comp:ocr', body: [
@@ -85,7 +89,7 @@ const feature = {
       '',
       '### Acceptance',
       '- Modal appears only in shard threads.',
-      '- Manual path works; snapshot includes message link & ts.'
+      '- Manual path works; snapshot includes message link & timestamp.'
     ]},
     { key: 'Commands & UI', comp: 'comp:shards', body: [
       '### Scope',
@@ -116,7 +120,7 @@ const feature = {
       'One pinned summary per clan; update in-week; new message on rollover.',
       '',
       '### Tasks',
-      '- Header + “updated X ago”; totals for 5 shard types.',
+      '- Header + "updated X ago"; totals for 5 shard types.',
       '- Paged member cards (10/page), stable sort (name then ID).',
       '- Prev / Next / Refresh buttons; ISO-week check.',
       '',
@@ -149,49 +153,59 @@ const feature = {
     ]}
   ]
 };
+// ------------------------------------------------
 
-// --------- helpers ----------
+// ---------- Helpers ----------
 async function resolveProject(login, title) {
-  // 1) Try user projects
+  // Try user first
   try {
     const r1 = await github.graphql(
-      `query($login:String!){
-         user(login:$login){ projectsV2(first:50){ nodes { id title number } } }
-       }`,
+      'query($login:String!){ user(login:$login){ projectsV2(first:50){ nodes{ id title number } } } }',
       { login }
     );
     const nodes = r1.user?.projectsV2?.nodes || [];
     const hit = nodes.find(p => p.title === title);
     if (hit) { core.info(`Using user project ${hit.number}: ${hit.title}`); return hit.id; }
-  } catch (e) { /* ignore and try org next */ }
-
-  // 2) Try organization projects (for repos under an org)
+  } catch (_) { /* ignore and try org */ }
+  // Then org (works if the login is an org)
   const r2 = await github.graphql(
-    `query($login:String!){
-       organization(login:$login){ projectsV2(first:50){ nodes { id title number } } }
-     }`,
+    'query($login:String!){ organization(login:$login){ projectsV2(first:50){ nodes{ id title number } } } }',
     { login }
   );
   const nodes2 = r2.organization?.projectsV2?.nodes || [];
   const hit2 = nodes2.find(p => p.title === title);
   if (hit2) { core.info(`Using org project ${hit2.number}: ${hit2.title}`); return hit2.id; }
-
   throw new Error(`Project "${title}" not found for ${login}.`);
 }
 
-// ----------------------------
+async function addToProject(projectId, nodeId) {
+  await github.graphql(
+    'mutation($projectId:ID!,$contentId:ID!){ addProjectV2ItemById(input:{projectId:$projectId,contentId:$contentId}){ item{ id } } }',
+    { projectId, contentId: nodeId }
+  );
+}
 
+async function ensureLabel(name, color) {
+  try { await github.rest.issues.getLabel({ owner, repo, name }); }
+  catch {
+    try { await github.rest.issues.createLabel({ owner, repo, name, color }); }
+    catch (e) { core.info(`ensureLabel: could not create "${name}" (${e.message || e})`); }
+  }
+}
+// -----------------------------------------------
+
+// 1) Resolve project
 const projectId = await resolveProject(PROJECT_OWNER, PROJECT_TITLE);
 
-// ensure labels exist (best effort)
+// 2) Ensure labels exist (best effort)
 await ensureLabel('epic', '5319e7');
 await ensureLabel('feature', '1f883d');
 
+// 3) Create/retrieve Epic
 const epicTitle = `[Feature] ${feature.title}`;
-const bullets = feature.useCases.map(u => `- ${u}`).join('\n');
-const plan = feature.subs.map(s => `- [ ] ${s.key}`).join('\n');
+const useCaseBullets = feature.useCases.map(u => `- ${u}`).join('\n');
+const planChecklist = feature.subs.map(s => `- [ ] ${s.key}`).join('\n');
 
-// create or get epic
 let epicNum, epicNode;
 {
   const search = await github.rest.search.issuesAndPullRequests({
@@ -202,26 +216,26 @@ let epicNum, epicNode;
     const full = await github.rest.issues.get({ owner, repo, issue_number: epicNum });
     epicNode = full.data.node_id;
   } else {
-    const body = [
-      ...feature.epicBody.slice(0, 6),
-      bullets,
-      ...feature.epicBody.slice(6, 12),
-      plan,
-      ...feature.epicBody.slice(12)
+    const epicBody = [
+      ...feature.epicBodyIntro,
+      useCaseBullets,
+      ...feature.epicBodyMiddle,
+      planChecklist,
+      ...feature.epicBodyEnd
     ].join('\n');
     const epic = await github.rest.issues.create({
       owner, repo, title: epicTitle,
       labels: ['feature','epic', feature.bot, feature.comp],
-      body
+      body: epicBody
     });
     epicNum = epic.data.number;
     epicNode = epic.data.node_id;
   }
 }
-// add epic to project
+// Add epic to project
 await addToProject(projectId, epicNode);
 
-// create/update children with rich bodies and add to project
+// 4) Create/update children with full bodies + add to project
 const childNums = [];
 for (const sub of feature.subs) {
   const childTitle = `[Feature] ${sub.key} - ${feature.title}`;
@@ -250,18 +264,21 @@ for (const sub of feature.subs) {
   childNums.push(num);
 }
 
-// update epic with a clean checklist of child refs (GitHub task-list links)
+// 5) Ensure the epic has a clean task-list linking children (so "Tracked in" works)
 const epicFull = await github.rest.issues.get({ owner, repo, issue_number: epicNum });
-const already = /### Sub-issues/.test(epicFull.data.body || '');
-if (!already) {
-  const checklist = childNums.map(n => `- [ ] #${n}`).join('\n');
-  await github.rest.issues.update({
-    owner, repo, issue_number: epicNum,
-    body: `${epicFull.data.body}\n\n### Sub-issues\n${checklist}`
-  });
-}
+const newChecklist = childNums.map(n => `- [ ] #${n}`).join('\n');
 
+let newBody;
+if (/### Sub-issues/.test(epicFull.data.body || '')) {
+  // replace everything from "### Sub-issues" to end with a fresh checklist
+  newBody = epicFull.data.body.replace(/### Sub-issues[\s\S]*$/m, `### Sub-issues\n${newChecklist}`);
+} else {
+  newBody = `${epicFull.data.body}\n\n### Sub-issues\n${newChecklist}`;
+}
+await github.rest.issues.update({ owner, repo, issue_number: epicNum, body: newBody });
+
+// 6) Done
 core.summary
   .addHeading('Feature setup complete')
-  .addRaw(`Epic: #${epicNum}\nChildren: ${childNums.map(n=>`#${n}`).join(', ')}`)
+  .addRaw(`Epic: #${epicNum}\nChildren: ${childNums.map(n => `#${n}`).join(', ')}`)
   .write();
