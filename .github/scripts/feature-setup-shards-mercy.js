@@ -152,34 +152,33 @@ const feature = {
 
 // --------- helpers ----------
 async function resolveProject(login, title) {
-  const gql = await github.graphql(
-    `query($login:String!) {
-       user(login:$login) { projectsV2(first:50) { nodes { id title number } } }
-       organization(login:$login) { projectsV2(first:50) { nodes { id title number } } }
-     }`, { login }
+  // 1) Try user projects
+  try {
+    const r1 = await github.graphql(
+      `query($login:String!){
+         user(login:$login){ projectsV2(first:50){ nodes { id title number } } }
+       }`,
+      { login }
+    );
+    const nodes = r1.user?.projectsV2?.nodes || [];
+    const hit = nodes.find(p => p.title === title);
+    if (hit) { core.info(`Using user project ${hit.number}: ${hit.title}`); return hit.id; }
+  } catch (e) { /* ignore and try org next */ }
+
+  // 2) Try organization projects (for repos under an org)
+  const r2 = await github.graphql(
+    `query($login:String!){
+       organization(login:$login){ projectsV2(first:50){ nodes { id title number } } }
+     }`,
+    { login }
   );
-  let nodes = [];
-  if (gql.user?.projectsV2?.nodes) nodes = nodes.concat(gql.user.projectsV2.nodes);
-  if (gql.organization?.projectsV2?.nodes) nodes = nodes.concat(gql.organization.projectsV2.nodes);
-  const proj = nodes.find(p => p.title === title);
-  if (!proj) throw new Error(`Project "${title}" not found for ${login}. Have: ` + nodes.map(n=>n.title).join(', '));
-  core.info(`Using project ${proj.number}: ${proj.title}`);
-  return proj.id;
+  const nodes2 = r2.organization?.projectsV2?.nodes || [];
+  const hit2 = nodes2.find(p => p.title === title);
+  if (hit2) { core.info(`Using org project ${hit2.number}: ${hit2.title}`); return hit2.id; }
+
+  throw new Error(`Project "${title}" not found for ${login}.`);
 }
-async function addToProject(projectId, nodeId) {
-  await github.graphql(
-    `mutation($projectId:ID!, $contentId:ID!) {
-       addProjectV2ItemById(input:{projectId:$projectId, contentId:$contentId}) { item { id } }
-     }`, { projectId, contentId: nodeId }
-  );
-}
-async function ensureLabel(name, color) {
-  try { await github.rest.issues.getLabel({ owner, repo, name }); }
-  catch {
-    try { await github.rest.issues.createLabel({ owner, repo, name, color }); }
-    catch { /* if perms forbid, ignore */ }
-  }
-}
+
 // ----------------------------
 
 const projectId = await resolveProject(PROJECT_OWNER, PROJECT_TITLE);
