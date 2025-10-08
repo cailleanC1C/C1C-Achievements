@@ -1,0 +1,33 @@
+*** Begin Patch
+*** Add File: .github/ISSUE_TEMPLATE/feature.yml
+name: Feature
+description: Request a new feature/change with clear acceptance criteria
+title: "[Feature] "
+labels: [feature, ready]
+body:
+  - type: input
+    id: module
+    attributes:
+      label: Module / Component
+      placeholder: comp:shards
+    validations: { required: true }
+  - type: textarea
+    id: goal
+    attributes: { label: Goal }
+    validations: { required: true }
+  - type: textarea
+    id: nongoals
+    attributes: { label: Non-goals }
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      placeholder: |
+        - Button X is visible on panel Y
+        - Command Z prints OK/missing for emojis
+    validations: { required: true }
+  - type: textarea
+    id: test
+    attributes: { label: Test steps }
+    validations: { required: true }
+*** End Patch
