@@ -1,0 +1,95 @@
+name: Guardrails CI
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+permissions:
+  contents: read
+  pull-requests: read
+jobs:
+  guardrails:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Install jq & yq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq yq
+
+      # 1) Label lint: batches must use canon labels only
+      - name: Load canon labels
+        id: canon
+        run: |
+          if [ ! -f .github/labels/harmonized.json ]; then
+            echo "::error::Missing .github/labels/harmonized.json"; exit 1; fi
+          jq -r '.[].name' .github/labels/harmonized.json | sort -u > /tmp/canon.txt
+          echo "Canon labels:"; cat /tmp/canon.txt
+
+      - name: Lint issue-batch labels
+        run: |
+          shopt -s nullglob
+          files=(.github/issue-batches/*.*)
+          if [ ${#files[@]} -gt 0 ]; then
+            bad=0
+            for f in "${files[@]}"; do
+              case "$f" in
+                *.yml|*.yaml) yq -o=json "$f" > /tmp/batch.json ;;
+                *.json) cp "$f" /tmp/batch.json ;;
+                *) continue ;;
+              esac
+              jq -r 'if type=="array" then .[]?.labels[]? else (.issues // [])[]?.labels[]? end' /tmp/batch.json \
+                | sort -u > /tmp/used.txt
+              echo "::group::Labels in $f"; cat /tmp/used.txt || true; echo "::endgroup::"
+              while read -r lbl; do
+                grep -Fxq "$lbl" /tmp/canon.txt || { echo "::error::Unknown/non-canon label \"$lbl\" in $f"; bad=1; }
+              done < /tmp/used.txt
+            done
+            test $bad -eq 0
+          fi
+
+      # 2) Doc path rules: global docs under docs/**; module docs under REVIEW/**
+      - name: Check doc locations
+        run: |
+          base="${{ github.event.pull_request.base.sha }}"
+          git fetch --no-tags origin $base
+          changed=$(git diff --name-status "$base"...HEAD | awk '$1 ~ /^[AM]/ {print $2}')
+          bad=0
+          while read -r p; do
+            [ -z "$p" ] && continue
+            case "$p" in
+              docs/*) : ;;                            # global docs ok
+              REVIEW/*) : ;;                          # module docs ok
+              .github/*) : ;;                         # GH config ok
+              README.md) : ;;                         # root readme ok
+              *.md)
+                echo "::error::Markdown docs must live under docs/** (global) or REVIEW/** (module): $p"; bad=1 ;;
+            esac
+          done <<< "$changed"
+          test $bad -eq 0
+
+      # 3) Workflow sanity: batch workflow exists  default points into issue-batches
+      - name: Validate batch-issues workflow default
+        run: |
+          test -f .github/workflows/batch-issues.yml || { echo "::error::Missing .github/workflows/batch-issues.yml"; exit 1; }
+          def=$(yq '.on.workflow_dispatch.inputs.file.default' .github/workflows/batch-issues.yml)
+          case "$def" in
+            ".github/issue-batches/"*) : ;;
+            *) echo "::error::batch-issues.yml default must point into .github/issue-batches/ (found: $def)"; exit 1 ;;
+          esac
+
+      # 4) Require module acceptance checklist when code changes
+      - name: Require acceptance checklist when code changes
+        run: |
+          base="${{ github.event.pull_request.base.sha }}"
+          git fetch --no-tags origin $base
+          changed=$(git diff --name-only "$base"...HEAD)
+          # If bot code changed, require at least one module checklist in the PR
+          needs_check=$(echo "$changed" | grep -E '^(cogs|adapters|utils|assets)/' || true)
+          if [ -n "$needs_check" ]; then
+            has_check=$(echo "$changed" | grep -E '^REVIEW/MODULE_.*/ACCEPTANCE_CHECKLIST.md$' || true)
+            if [ -z "$has_check" ]; then
+              echo "::error::Code changed but no REVIEW/MODULE_*/ACCEPTANCE_CHECKLIST.md included in this PR."
+              exit 1
+            fi
+          fi
+*** End Patch
