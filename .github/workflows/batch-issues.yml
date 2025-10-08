@@ -6,7 +6,7 @@ on:
       file:
         description: "Path to issues JSON or YAML inside this repo"
         required: true
-        default: ".github/issue-batches/issues.json"
+        default: ".github/issue-batches/shards-planning.json"
 
 jobs:
   create:
