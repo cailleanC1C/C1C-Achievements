@@ -1,5 +1,3 @@
-*** Begin Patch
-*** Add File: docs/ADR/ADR-001-emojis-json.md
 # ADR-001 — Shard emojis via repo JSON (optional Sheet override)
 **Status:** Accepted • **Date:** 2025-10-08
 
@@ -17,4 +15,3 @@ Shard-type icons should be consistent, fast to load, and versioned with code.
 
 ## Alternatives considered
 - Fully Sheet-driven (rejected: quotas, latency, silent fallbacks).
-*** End Patch
