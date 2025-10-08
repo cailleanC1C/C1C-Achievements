@@ -1,5 +1,3 @@
-*** Begin Patch
-*** Add File: docs/ENGINEERING.md
 # C1C Engineering Contract (Dev Guardrails)
 
 These are the non-negotiables for how we change and ship things.
@@ -31,4 +29,3 @@ No feature merges unless the PR contains (or links) a module **ACCEPTANCE_CHECKL
 
 ## Codex templates
 Pinned, copy-pasteable Codex commands live in `docs/CODEX_TEMPLATES.md`.
-*** End Patch
