@@ -1,25 +1,19 @@
 name: feature-setup-shards-mercy
-
-on:
-  workflow_dispatch:
-
+on: { workflow_dispatch: {} }
 permissions:
   contents: read
   issues: write
-
 jobs:
   make:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run prefilled setup script
+      - name: Run full setup
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.PROJECTS_TOKEN }}   # <— use your PAT so we can edit Projects
+          github-token: ${{ secrets.PROJECTS_TOKEN }}
           script: |
             const fs = require('fs');
-            const path = '.github/scripts/feature-setup-shards-mercy.js';
-            const code = fs.readFileSync(path, 'utf8');
+            const code = fs.readFileSync('.github/scripts/feature-setup-shards-mercy.js','utf8');
             const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
-            const run = new AsyncFunction('github','context','core', code);
-            await run(github, context, core);
+            await new AsyncFunction('github','context','core', code)(github, context, core);
