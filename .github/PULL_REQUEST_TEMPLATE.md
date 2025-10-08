@@ -1,5 +1,3 @@
-*** Begin Patch
-*** Add File: .github/PULL_REQUEST_TEMPLATE.md
 ## Summary
 <!-- What changed and why (1–3 lines) -->
 
@@ -12,4 +10,3 @@
 
 ## Acceptance Checklist (link or paste)
 <!-- Link to module checklist or paste relevant items -->
-*** End Patch
