@@ -1,0 +1,75 @@
+{
+  "milestone": "Shard Module v0.4 — Manual First",
+  "defaults": {
+    "assignees": []
+  },
+  "issues": [
+    {
+      "title": "Epic: OCR v2 (postponed)",
+      "body": "**Why**: Current OCR splits large numbers and mis-assigns wide screenshots; we are deferring improvements until manual-first UX and emoji compliance land.\n\n**Scope**: Token stitching, per-band PSM7 tuning, smarter ROI scoring, richer debug output.\n\n**Blocked by**: Manual-entry rollout assessment.",
+      "labels": ["bot: achievements", "area: shards", "type: epic", "status: blocked"],
+      "acceptance_criteria": [
+        "Successor issues created for token stitching, per-band OCR tuning, and debug UX.",
+        "Rollout plan approved by staff once manual-first is stable."
+      ],
+      "non_goals": [
+        "Do not change shard thread triggers or manual-entry surfaces.",
+        "Do not ship OCR model swaps (keep Tesseract 5.5)."
+      ],
+      "test_plan": [
+        "Document validation scenarios for each child issue before unblocking."
+      ],
+      "rollout_notes": [
+        "Mark epic as ready only after Manual First milestone completes."
+      ]
+    },
+    {
+      "title": "Feature: Add \"Manual entry (Skip OCR)\" on first panel",
+      "body": "**Why**: Clan staff need a zero-OCR path to enter counts immediately, even when screenshots fail or are absent.\n\n**Scope**: Add manual-entry button to the public shard prompt, reuse existing modal flow, make it accessible without attachments, and ensure audit logging stays the same.",
+      "labels": ["bot: achievements", "area: shards", "type: feature", "status: ready"],
+      "acceptance_criteria": [
+        "First-panel prompt shows Manual entry (Skip OCR) alongside Scan/Dismiss.",
+        "Pressing the new button opens the manual modal without invoking OCR or touching cache.",
+        "Manual-entry path is available when no screenshot is attached (in shard threads only).",
+        "Logging/Sheets rows continue tagging these entries as manual."
+      ],
+      "non_goals": [
+        "Do not change OCR retry behavior or cache policy.",
+        "Do not alter manual modal fields beyond emoji updates handled separately."
+      ],
+      "test_plan": [
+        "Post shard screenshot, press Manual entry, submit counts → verify summary updates.",
+        "Post text-only message in shard thread, use Manual entry → verify modal opens and saves.",
+        "Ensure Scan button stays disabled or errors gracefully when no attachment is present."
+      ],
+      "rollout_notes": [
+        "Announce change in shard threads before enabling to avoid confusion.",
+        "Monitor logs for manual submissions during first 48 hours."
+      ]
+    },
+    {
+      "title": "Feature: Use custom server shard emojis everywhere",
+      "body": "**Why**: Policy requires shard counters and UI to display server-specific emoji, not unicode placeholders.\n\n**Scope**: Introduce a central emoji mapping (JSON + helper), validate Sheets overrides, and replace unicode fallbacks across cog, views, renderer, and help copy.",
+      "labels": ["bot: achievements", "area: shards", "type: feature", "status: ready"],
+      "acceptance_criteria": [
+        "Shared emoji mapping file committed with server IDs.",
+        "OCR preview, manual modal, mercy buttons, and summary embeds render custom emojis.",
+        "Help text/commands reflect the same emoji set.",
+        "Log warning when mapping fallback (unicode) is hit so staff can remediate."
+      ],
+      "non_goals": [
+        "Do not change sheet schema beyond validating emoji columns.",
+        "Do not modify non-shard emoji usage (e.g., claims)."
+      ],
+      "test_plan": [
+        "Trigger OCR preview and confirm emojis render as `<:name:id>` in Discord.",
+        "Open manual modal to verify labels/buttons show custom emojis.",
+        "Run `!shards help` and ensure text matches the mapping."
+      ],
+      "rollout_notes": [
+        "Coordinate with art team to upload emoji assets before deploy.",
+        "Update configuration doc with emoji ID references."
+      ]
+    }
+  ]
+}
