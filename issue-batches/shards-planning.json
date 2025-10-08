@@ -1,0 +1,60 @@
+{
+  "milestone": "Shard Module v0.4 — Manual First",
+  "defaults": {
+    "assignees": []
+  },
+  "issues": [
+    {
+      "title": "Feature: Manual entry (Skip OCR) on first panel",
+      "body": "**Why**: Staff need to bypass OCR from the opening prompt so misreads or missing attachments do not block manual count entry.\n\n**Scope**: Add the Manual entry (Skip OCR) control alongside Scan Image and Dismiss, wire it to the existing modal without touching OCR caches, and confirm manual logging works when no attachment is present.",
+      "labels": ["bot: achievements", "area: shards", "type: feature", "status: ready"],
+      "acceptance_criteria": [
+        "First-panel prompt shows Manual entry (Skip OCR) alongside Scan Image and Dismiss.",
+        "Invoking the button opens the manual modal without triggering OCR or cache lookups.",
+        "Manual path works whether or not an attachment is present, limited to shard threads.",
+        "Audit/log entries clearly record the manual path choice for analytics.",
+        "Interaction honours existing timeout/ephemeral behaviour so buttons tidy themselves up."
+      ],
+      "test_plan": [
+        "Run Discord interaction in a shard thread with an image: choose Manual entry, submit counts, verify summary/logs.",
+        "Repeat without an attachment in the same thread: ensure modal opens and saves without OCR side effects.",
+        "Trigger Scan, then Retry, confirming manual button remains available and cache resets do not interfere."
+      ],
+      "rollout_notes": [
+        "Announce manual-first availability to shard staff and monitor logs for manual submissions during launch window."
+      ]
+    },
+    {
+      "title": "Feature: Custom shard emojis via centralized mapping",
+      "body": "**Why**: Emoji usage drifts across layers today; a shared registry ensures previews, modals, embeds, and logs render the same custom IDs and surface configuration gaps.\n\n**Scope**: Create a single emoji registry keyed by shard band, require all render paths to consume it, add health/info warnings for missing IDs, and update documentation with sourcing expectations.",
+      "labels": ["bot: achievements", "area: shards", "type: feature", "status: ready"],
+      "acceptance_criteria": [
+        "All shard renders (preview, manual modal, final summary, logging) source emoji from one centralized registry of IDs.",
+        "Health/info command surfaces an explicit warning for any shard key missing an emoji ID.",
+        "Documentation reflects setup steps for maintaining the emoji registry and required IDs.",
+        "Fallback unicode squares are removed; any intentional text fallback is explicit and logged."
+      ],
+      "test_plan": [
+        "Trigger OCR preview and manual modal to confirm each surface pulls custom emoji IDs from the registry.",
+        "Run health/info command with a missing mapping to observe the warning, then restore the entry and confirm it clears.",
+        "Review final summary/log payloads to ensure they include registry-driven emoji identifiers."
+      ],
+      "rollout_notes": [
+        "Coordinate emoji ID audit before deploy; revert by pointing consumers back to existing config if unexpected regressions arise."
+      ]
+    },
+    {
+      "title": "Epic: OCR v2 (postponed)",
+      "body": "**Why**: Advanced OCR improvements remain valuable but must wait until manual-first UX and emoji alignment land.\n\n**Scope**: Track the deferred OCR v2 work and unblock only after the two ready features ship.",
+      "labels": ["bot: achievements", "area: shards", "type: epic", "status: blocked"],
+      "children": [
+        "Token stitching per band",
+        "Per-band PSM7 tuning",
+        "Richer debug bundle"
+      ],
+      "rollout_notes": [
+        "Re-evaluate after Manual entry and emoji registry features reach production to lift the block."
+      ]
+    }
+  ]
+}
