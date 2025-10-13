@@ -3,14 +3,13 @@ from __future__ import annotations
 
 from typing import Any, List, Sequence, Tuple
 
-SCOPED_PREFIXES: Tuple[str, ...] = ("!sc", "!rem", "!wc", "!mm")
+SCOPED_PREFIXES: Tuple[str, ...] = ("!sc", "!rem", "!rec")
 GLOBAL_PREFIX: str = "!"
 ALL_PREFIXES: Tuple[str, ...] = SCOPED_PREFIXES + (GLOBAL_PREFIX,)
 PREFIX_LABELS = {
     "!sc": "Scribe",
     "!rem": "Reminder",
-    "!wc": "Welcome Crew",
-    "!mm": "Matchmaker",
+    "!rec": "Recruitment",
 }
 
 
