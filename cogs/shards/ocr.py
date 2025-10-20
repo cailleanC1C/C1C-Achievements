@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import io
 import re
+import subprocess
 from dataclasses import dataclass, replace
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 # Importing here so the cog can still boot if OCR stack is missing.
 try:
@@ -50,6 +51,7 @@ class _OcrToken:
     height: int
     conf: float
     text: str
+    source: str = ""
 
     @property
     def right(self) -> int:
@@ -75,6 +77,99 @@ def _rounded_token_key(tok: _OcrToken, step: int = 4) -> Tuple[int, int, int, in
     return (_r(tok.left), _r(tok.top), _r(tok.width), _r(tok.height), tok.text)
 
 
+def _extract_oem_psm(cfg: str) -> Tuple[int, int]:
+    oem = -1
+    psm = -1
+    try:
+        m = re.search(r"--oem\s+(\d)", cfg)
+        if m:
+            oem = int(m.group(1))
+    except Exception:
+        pass
+    try:
+        m = re.search(r"--psm\s+(\d+)", cfg)
+        if m:
+            psm = int(m.group(1))
+    except Exception:
+        pass
+    return oem, psm
+
+
+def _summarize_config(cfg: str) -> str:
+    oem, psm = _extract_oem_psm(cfg)
+    parts = []
+    if oem >= 0:
+        parts.append(f"--oem {oem}")
+    if psm >= 0:
+        parts.append(f"--psm {psm}")
+    return " ".join(parts) or cfg.strip()
+
+
+def _otsu_threshold(gray: "Image.Image") -> int:
+    hist = gray.histogram()
+    total = sum(hist)
+    sum_total = 0.0
+    for i, h in enumerate(hist):
+        sum_total += i * h
+
+    sumB = 0.0
+    wB = 0.0
+    max_var = -1.0
+    threshold = 127
+    for i, h in enumerate(hist):
+        wB += h
+        if wB == 0:
+            continue
+        wF = total - wB
+        if wF == 0:
+            break
+        sumB += i * h
+        mB = sumB / wB
+        mF = (sum_total - sumB) / wF
+        between = wB * wF * (mB - mF) ** 2
+        if between > max_var:
+            max_var = between
+            threshold = i
+    return threshold
+
+
+def _parse_source_meta(source: str) -> Tuple[str, str]:
+    cfg = source
+    processed = ""
+    for part in (source or "").split("|"):
+        if part.startswith("cfg="):
+            cfg = part[4:]
+        elif part.startswith("img="):
+            processed = part[4:]
+    return cfg, processed
+
+
+@dataclass
+class BandDebugImage:
+    shard: ShardType
+    band_index: int
+    ratio: float
+    aggressive: bool
+    width: int
+    height: int
+    raw_bytes: bytes
+    processed_bytes: bytes
+    processed_label: str
+    oem: int
+    psm: int
+    config_summary: str
+    text: str
+    conf: float
+
+
+@dataclass
+class OcrDebugBundle:
+    counts: Dict[ShardType, int]
+    score: int
+    ratio: float
+    bands: List[BandDebugImage]
+
+
 # ---------------------------
 # Public helpers (imported by cog)
 # ---------------------------
@@ -88,10 +183,29 @@ def ocr_runtime_info() -> Dict[str, str] | None:
             tver = str(pytesseract.get_tesseract_version())
         except Exception:
             tver = "unknown"
+        try:
+            proc = subprocess.run(
+                ["tesseract", "--version"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+            lines = (proc.stdout or proc.stderr or "").splitlines()
+            cli_ver = lines[0].strip() if lines else "unknown"
+        except Exception:
+            cli_ver = "unknown"
+        try:
+            langs = sorted(set(pytesseract.get_languages(config="") or []))
+            lang_str = ", ".join(langs)
+        except Exception:
+            lang_str = ""
         return {
             "tesseract_version": tver,
+            "tesseract_cli_version": cli_ver,
             "pytesseract_version": getattr(pytesseract, "__version__", "unknown"),
             "pillow_version": getattr(Image, "__version__", "unknown"),
+            "tesseract_languages": lang_str,
         }
     except Exception:
         return None
@@ -148,7 +262,7 @@ def extract_counts_from_image_bytes(data: bytes) -> Dict[ShardType, int]:
 
         for r in ratios:
             roi = _left_rail_crop(base, r)
-            counts, score = _read_counts_from_roi(roi, timeout_sec=6)
+            counts, score, _ = _read_counts_from_roi(roi, timeout_sec=6)
             if score > best_score:
                 best_counts, best_score = counts, score
 
@@ -201,7 +315,7 @@ def extract_counts_with_debug(
         best_score = -1
         for r in ratios:
             roi = _left_rail_crop(base, r)
-            counts, score = _read_counts_from_roi(roi, timeout_sec=timeout_sec)
+            counts, score, _ = _read_counts_from_roi(roi, timeout_sec=timeout_sec)
             if score > best_score:
                 best_counts, best_score = counts, score
 
@@ -211,6 +325,55 @@ def extract_counts_with_debug(
         return (best_counts, dbg)
     except Exception:
         return ({}, [])
+
+
+# ---------------------------
+# Debug helpers
+# ---------------------------
+
+def collect_debug_bundle(data: bytes, timeout_sec: int = 6) -> Optional[OcrDebugBundle]:
+    if pytesseract is None or Image is None or ImageOps is None:
+        return None
+
+    try:
+        base = Image.open(io.BytesIO(data))
+        base = ImageOps.exif_transpose(base)
+
+        scale = _scale_if_small(base.width, base.height)
+        if scale != 1.0:
+            base = base.resize((int(base.width * scale), int(base.height * scale)))
+
+        ratios = (0.38, 0.42, 0.46)
+        best_counts: Dict[ShardType, int] = {}
+        best_score = -1
+        best_ratio = ratios[0]
+        best_debug: List[BandDebugImage] = []
+
+        for r in ratios:
+            roi = _left_rail_crop(base, r)
+            counts, score, debug_entries = _read_counts_from_roi(
+                roi,
+                timeout_sec=timeout_sec,
+                collect_debug=True,
+                ratio=r,
+            )
+            if score > best_score:
+                best_counts = counts
+                best_score = score
+                best_ratio = r
+                best_debug = debug_entries
+
+        for st in ShardType:
+            best_counts.setdefault(st, 0)
+
+        return OcrDebugBundle(
+            counts=best_counts,
+            score=best_score,
+            ratio=best_ratio,
+            bands=best_debug,
+        )
+    except Exception:
+        return None
 
 
 # ---------------------------
@@ -243,6 +406,17 @@ def _preprocess_roi(roi: "Image.Image") -> Tuple["Image.Image", "Image.Image"]:
     bin_img = gray.point(lambda p: 255 if p > 160 else 0)
     # Thicken thin strokes a touch; improves small numerals like 3/1.
     bin_img = bin_img.filter(ImageFilter.MaxFilter(3))
+    return gray, bin_img
+
+
+def _preprocess_roi_strong(roi: "Image.Image") -> Tuple["Image.Image", "Image.Image"]:
+    """Aggressive preprocessing (adaptive threshold) used for fallback passes."""
+    gray = ImageOps.grayscale(roi)
+    gray = ImageOps.autocontrast(gray)
+    gray = gray.filter(ImageFilter.UnsharpMask(radius=1.2, percent=160, threshold=2))
+    thresh = _otsu_threshold(gray)
+    bin_img = gray.point(lambda p: 255 if p > thresh else 0)
+    bin_img = bin_img.filter(ImageFilter.MaxFilter(3)).filter(ImageFilter.MinFilter(3))
     return gray, bin_img
 
 def _normalize_digits(s: str) -> str:
@@ -295,6 +469,7 @@ def _merge_band_tokens(tokens: List[_OcrToken]) -> List[_OcrToken]:
                 height=new_bottom - new_top,
                 conf=min(prev.conf, tok.conf),
                 text=prev.text + tok.text,
+                source=prev.source or tok.source,
             )
             continue
 
@@ -307,34 +482,52 @@ def _run_psm7_band_pass(
     sub_img_bin: "Image.Image",
     sub_img_gray: "Image.Image",
     timeout_sec: int,
-) -> Tuple[str, float] | None:
-    """Run the tighter per-band OCR pass and return the best (text, conf)."""
-    picks: List[Tuple[str, float]] = []
-    for sub_img in (sub_img_bin, sub_img_gray):
-        try:
-            dd2 = pytesseract.image_to_data(
-                sub_img,
-                output_type=Output.DICT,
-                config="--oem 1 --psm 7 -c tessedit_char_whitelist=0123456789., -c classify_bln_numeric_mode=1",
-                timeout=max(2, timeout_sec // 2),
-            )
-        except Exception:
-            continue
+    aggressive: bool = False,
+) -> Tuple[str, float, str] | None:
+    """Run the tighter per-band OCR pass and return the best (text, conf, cfg)."""
+    picks: List[Tuple[str, float, str]] = []
+    if aggressive:
+        cfgs = [
+            "--oem 1 --psm 8 -c tessedit_char_whitelist=0123456789 -c classify_bln_numeric_mode=1",
+            "--oem 1 --psm 10 -c tessedit_char_whitelist=0123456789 -c classify_bln_numeric_mode=1",
+        ]
+    else:
+        cfgs = [
+            "--oem 1 --psm 7 -c tessedit_char_whitelist=0123456789., -c classify_bln_numeric_mode=1",
+        ]
 
-        m = len(dd2.get("text", []))
-        for j in range(m):
-            raw2 = (dd2["text"][j] or "").strip()
-            if not raw2:
-                continue
-            t2 = _normalize_digits(raw2)
-            if not (_NUM_RE.match(t2) or t2.isdigit()):
-                continue
+    for label, sub_img in (("bin", sub_img_bin), ("gray", sub_img_gray)):
+        for cfg in cfgs:
             try:
-                conf2 = float(dd2["conf"][j])
+                dd2 = pytesseract.image_to_data(
+                    sub_img,
+                    output_type=Output.DICT,
+                    config=cfg,
+                    timeout=max(2, timeout_sec // 2),
+                )
             except Exception:
-                conf2 = -1.0
-            if conf2 >= 10:
-                picks.append((t2, conf2))
+                continue
+
+            m = len(dd2.get("text", []))
+            for j in range(m):
+                raw2 = (dd2["text"][j] or "").strip()
+                if not raw2:
+                    continue
+                t2 = _normalize_digits(raw2)
+                if not (_NUM_RE.match(t2) or t2.isdigit()):
+                    continue
+                try:
+                    conf2 = float(dd2["conf"][j])
+                except Exception:
+                    conf2 = -1.0
+                if conf2 >= 10:
+                    picks.append(
+                        (
+                            t2,
+                            conf2,
+                            f"mode={'fallback' if aggressive else 'primary'}|img={label}|cfg={cfg}|micro=1",
+                        )
+                    )
 
     if not picks:
         return None
@@ -342,35 +535,72 @@ def _run_psm7_band_pass(
     return max(picks, key=lambda p: _score_band_token(p[0], p[1]))
 
 
-def _read_counts_from_roi(roi, timeout_sec: int = 6) -> Tuple[Dict[ShardType, int], int]:
-    """
-    OCR the ROI and split vertically into 5 bands. We try multiple OCR passes:
-    binary → inverted-binary → gray; and two configs (PSM 11 then PSM 6).
-    Returns (counts, score) where score = number of bands with nonzero readings.
-    """
-    gray, bin_img = _preprocess_roi(roi)
+def _read_counts_from_roi(
+    roi,
+    timeout_sec: int = 6,
+    *,
+    collect_debug: bool = False,
+    ratio: float = 0.0,
+) -> Tuple[Dict[ShardType, int], int, List[BandDebugImage]]:
+    """OCR the ROI and split vertically into 5 bands."""
+    primary = _read_counts_from_roi_impl(
+        roi,
+        timeout_sec=timeout_sec,
+        aggressive=False,
+        collect_debug=collect_debug,
+        ratio=ratio,
+    )
+    counts, score, debug_primary = primary
+    if score > 0:
+        return counts, score, debug_primary if collect_debug else []
 
-    # candidate images to try
-    candidates: List[Image.Image] = [bin_img]
+    fallback = _read_counts_from_roi_impl(
+        roi,
+        timeout_sec=timeout_sec,
+        aggressive=True,
+        collect_debug=collect_debug,
+        ratio=ratio,
+    )
+    f_counts, f_score, debug_fallback = fallback
+    if f_score > score:
+        return f_counts, f_score, debug_fallback if collect_debug else []
+    return counts, score, debug_primary if collect_debug else []
+
+
+def _read_counts_from_roi_impl(
+    roi,
+    *,
+    timeout_sec: int,
+    aggressive: bool,
+    collect_debug: bool,
+    ratio: float,
+) -> Tuple[Dict[ShardType, int], int, List[BandDebugImage]]:
+    if aggressive:
+        gray, bin_img = _preprocess_roi_strong(roi)
+        cfgs = [
+            "--oem 1 --psm 8 -c tessedit_char_whitelist=0123456789., -c preserve_interword_spaces=1 -c classify_bln_numeric_mode=1",
+            "--oem 1 --psm 10 -c tessedit_char_whitelist=0123456789 -c classify_bln_numeric_mode=1",
+        ]
+    else:
+        gray, bin_img = _preprocess_roi(roi)
+        cfgs = [
+            "--oem 3 --psm 6  -c tessedit_char_whitelist=0123456789., -c preserve_interword_spaces=1 -c classify_bln_numeric_mode=1",
+            "--oem 3 --psm 11 -c tessedit_char_whitelist=0123456789., -c preserve_interword_spaces=1 -c classify_bln_numeric_mode=1",
+        ]
+
+    candidates: List[Tuple[str, "Image.Image"]] = [("bin", bin_img)]
     try:
-        candidates.append(ImageOps.invert(bin_img))
+        candidates.append(("bin_inv", ImageOps.invert(bin_img)))
     except Exception:
         pass
-    candidates.append(gray)
-
-    # OCR configs to try (prefer sparse text first)
-    cfgs = [
-        "--oem 3 --psm 6  -c tessedit_char_whitelist=0123456789., -c preserve_interword_spaces=1 -c classify_bln_numeric_mode=1",
-        "--oem 3 --psm 11 -c tessedit_char_whitelist=0123456789., -c preserve_interword_spaces=1 -c classify_bln_numeric_mode=1",
-    ]
+    candidates.append(("gray", gray))
 
     token_map: Dict[Tuple[int, int, int, int, str], _OcrToken] = {}
     W, H = bin_img.size
-    # Accept up to ~60% of the left rail; still rejects mid-screen counters (e.g., 238/270).
     left_frac = 0.60
     max_x = int(W * left_frac)
 
-    for img in candidates:
+    for img_label, img in candidates:
         for cfg in cfgs:
             try:
                 dd = pytesseract.image_to_data(
@@ -398,38 +628,56 @@ def _read_counts_from_roi(roi, timeout_sec: int = 6) -> Tuple[Dict[ShardType, in
                 cx = x + w // 2; cy = y + h // 2
                 if cx > max_x:
                     continue
-                token = _OcrToken(left=x, top=y, width=w, height=h, conf=conf, text=txt)
+                token = _OcrToken(
+                    left=x,
+                    top=y,
+                    width=w,
+                    height=h,
+                    conf=conf,
+                    text=txt,
+                    source=f"mode={'fallback' if aggressive else 'primary'}|img={img_label}|cfg={cfg}",
+                )
                 key = _rounded_token_key(token)
                 prev = token_map.get(key)
                 if prev is None or conf > prev.conf:
                     token_map[key] = token
 
-        # If we've found a healthy number of candidates, stop early.
         if len(token_map) >= 8:
             break
 
-    # Split ROI into 5 vertical bands; pick best token per band.
     counts_by_band: List[int] = []
+    debug_entries: List[BandDebugImage] = []
     band_h = H / 5.0
     tokens = list(token_map.values())
+    order = [ShardType.MYSTERY, ShardType.ANCIENT, ShardType.VOID, ShardType.PRIMAL, ShardType.SACRED]
+
     for band in range(5):
         y0 = band * band_h
         y1 = (band + 1) * band_h
         cands = [tok for tok in tokens if y0 <= tok.cy < y1]
         cands = _merge_band_tokens(cands)
-        main_pick: Tuple[str, float] | None = None
+        best_token: Optional[_OcrToken] = None
         if cands:
-            best = max(cands, key=lambda t: _score_band_token(t.text, t.conf))
-            main_pick = (best.text, best.conf)
+            best_token = max(cands, key=lambda t: _score_band_token(t.text, t.conf))
 
-        micro_pick: Tuple[str, float] | None = None
+        main_pick: Optional[Tuple[str, float, str]] = None
+        if best_token is not None:
+            main_pick = (best_token.text, best_token.conf, best_token.source)
+
+        micro_pick: Optional[Tuple[str, float, str]] = None
         bx0, bx1 = 0, max_x
         by0 = int(y0 + band_h * 0.15)
         by1 = int(y0 + band_h * 0.85)
+        sub = None
+        sub_gray = None
+        sub_bin = None
         try:
             sub = roi.crop((bx0, by0, bx1, by1))
-            sub_gray, sub_bin = _preprocess_roi(sub)
-            micro_pick = _run_psm7_band_pass(sub_bin, sub_gray, timeout_sec)
+            if aggressive:
+                sub_gray, sub_bin = _preprocess_roi_strong(sub)
+            else:
+                sub_gray, sub_bin = _preprocess_roi(sub)
+            micro_pick = _run_psm7_band_pass(sub_bin, sub_gray, timeout_sec, aggressive=aggressive)
         except Exception:
             micro_pick = None
 
@@ -442,14 +690,50 @@ def _read_counts_from_roi(roi, timeout_sec: int = 6) -> Tuple[Dict[ShardType, in
         else:
             counts_by_band.append(_parse_num_token(best_pick[0]))
 
-    # Map bands to shard types (top→bottom)
-    order = [ShardType.MYSTERY, ShardType.ANCIENT, ShardType.VOID, ShardType.PRIMAL, ShardType.SACRED]
+        if collect_debug:
+            cfg_str = ""
+            processed_label = ""
+            if best_pick is not None:
+                cfg_str, processed_label = _parse_source_meta(best_pick[2])
+            else:
+                cfg_str = ""
+                processed_label = "bin"
+            if sub is None:
+                sub = roi.crop((bx0, by0, bx1, by1))
+                if aggressive:
+                    sub_gray, sub_bin = _preprocess_roi_strong(sub)
+                else:
+                    sub_gray, sub_bin = _preprocess_roi(sub)
+            processed_img = sub_bin if (processed_label or "bin").startswith("bin") else sub_gray
+            processed_img = processed_img or sub_bin or sub_gray
+            raw_bytes = _img_to_png_bytes(sub) if sub else b""
+            processed_bytes = _img_to_png_bytes(processed_img) if processed_img else b""
+            oem, psm = _extract_oem_psm(cfg_str)
+            debug_entries.append(
+                BandDebugImage(
+                    shard=order[band],
+                    band_index=band,
+                    ratio=ratio,
+                    aggressive=aggressive,
+                    width=sub.width if sub else 0,
+                    height=sub.height if sub else 0,
+                    raw_bytes=raw_bytes,
+                    processed_bytes=processed_bytes,
+                    processed_label=(processed_label or "bin"),
+                    oem=oem,
+                    psm=psm,
+                    config_summary=_summarize_config(cfg_str) if cfg_str else "",
+                    text=best_pick[0] if best_pick else "",
+                    conf=best_pick[1] if best_pick else -1.0,
+                )
+            )
+
     counts: Dict[ShardType, int] = {}
     for st, val in zip(order, counts_by_band):
         counts[st] = max(0, int(val))
 
     score = sum(1 for v in counts_by_band if v > 0)
-    return counts, score
+    return counts, score, debug_entries
 
 
 def _img_to_png_bytes(img: "Image.Image") -> bytes:

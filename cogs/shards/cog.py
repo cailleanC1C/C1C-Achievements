@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
+import os
 import time
 from typing import Dict, Optional, List
 from datetime import datetime, timezone
@@ -14,6 +16,7 @@ from . import sheets_adapter as SA
 from .views import SetCountsModal, AddPullsStart, AddPullsCount, AddPullsRarities
 from .renderer import build_summary_embed
 from .ocr import (
+    collect_debug_bundle,
     extract_counts_from_image_bytes,
     extract_counts_with_debug,
     ocr_runtime_info,
@@ -27,6 +30,26 @@ log = logging.getLogger("c1c-claims")
 def _has_any_role(member: discord.Member, role_ids: List[int]) -> bool:
     rids = {r.id for r in member.roles}
     return any(r in rids for r in role_ids)
+
+
+def _env_truthy(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
+def _parse_id_set(raw: str) -> set[int]:
+    ids: set[int] = set()
+    for part in raw.replace(";", ",").split(","):
+        chunk = part.strip()
+        if not chunk:
+            continue
+        try:
+            ids.add(int(chunk))
+        except Exception:
+            continue
+    return ids
 
 
 def _is_image_attachment(att: discord.Attachment) -> bool:
@@ -44,21 +67,34 @@ class ShardsCog(commands.Cog):
         self.cfg, self.clans = SA.load_config()  # wire to Sheets
         self._live_views: Dict[int, discord.ui.View] = {}  # keep views referenced until timeout
         self._ocr_cache: Dict[tuple[int, int, int], Dict[ShardType, int]] = {}  # (guild_id, channel_id, msg_id) -> counts
+        self._ocr_debug_enabled = _env_truthy("ENABLE_OCR_DEBUG", False)
+        self._ocr_debug_guilds = _parse_id_set(os.getenv("OCR_DEBUG_GUILD_IDS", ""))
+        self._last_debug_image: Optional[bytes] = None
 
         # Log OCR stack once for visibility
         try:
             info = ocr_runtime_info()
             if info:
                 log.info(
-                    "[ocr] tesseract=%s | pytesseract=%s | pillow=%s",
+                    "[ocr] tesseract=%s (cli=%s) | pytesseract=%s | pillow=%s",
                     info.get("tesseract_version"),
+                    info.get("tesseract_cli_version"),
                     info.get("pytesseract_version"),
                     info.get("pillow_version"),
                 )
+                langs = info.get("tesseract_languages")
+                if langs:
+                    log.info("[ocr] tesseract languages: %s", langs)
             else:
                 log.warning("[ocr] runtime info unavailable (pytesseract/Pillow not importable)")
         except Exception:
             log.exception("[ocr] failed to query OCR runtime info")
+
+        log.info(
+            "[ocr] debug command enabled=%s guilds=%s",
+            self._ocr_debug_enabled,
+            ",".join(str(g) for g in sorted(self._ocr_debug_guilds)) or "—",
+        )
 
     # ---------- GUARDS ----------
     def _clan_for_member(self, member: discord.Member) -> Optional[str]:
@@ -82,6 +118,7 @@ class ShardsCog(commands.Cog):
     async def _ocr_prefill_from_attachment(self, att: discord.Attachment) -> Dict[ShardType, int]:
         try:
             data = await att.read()
+            self._last_debug_image = data
             counts = await asyncio.to_thread(extract_counts_from_image_bytes, data) or {}
             # normalize missing keys so the preview always has all five
             for st in ShardType:
@@ -143,6 +180,7 @@ class ShardsCog(commands.Cog):
         async def _ocr_debug_background():
             try:
                 data = await images[0].read()
+                self._last_debug_image = data
                 counts, dbg_imgs = await asyncio.to_thread(extract_counts_with_debug, data, 8)
                 if sum(counts.values()) == 0 and dbg_imgs:
                     import io as _io
@@ -343,6 +381,98 @@ class ShardsCog(commands.Cog):
         asyncio.create_task(_drop())
 
     # ---------- OCR DIAGNOSTICS ----------
+    @commands.command(name="ocrdebug")
+    @commands.guild_only()
+    async def ocr_debug_cmd(self, ctx: commands.Context):
+        if not self._ocr_debug_enabled:
+            await ctx.reply("OCR debug command is disabled. Ask an admin to enable ENABLE_OCR_DEBUG.", mention_author=False)
+            return
+
+        if ctx.guild is None or ctx.guild.id not in self._ocr_debug_guilds:
+            await ctx.reply("OCR debug is only available in approved test guilds.", mention_author=False)
+            return
+
+        member = ctx.author if isinstance(ctx.author, discord.Member) else None
+        if member is None:
+            await ctx.reply("Guild-only command.", mention_author=False)
+            return
+
+        staff_roles = getattr(self.cfg, "roles_staff_override", [])
+        perms = member.guild_permissions
+        if not (perms.manage_guild or perms.administrator or _has_any_role(member, staff_roles)):
+            await ctx.reply("You need Manage Server or a staff override role to run this.", mention_author=False)
+            return
+
+        images = [a for a in ctx.message.attachments if _is_image_attachment(a)]
+        data: Optional[bytes] = None
+        if images:
+            try:
+                data = await images[0].read()
+                self._last_debug_image = data
+            except Exception:
+                data = None
+
+        if data is None:
+            data = self._last_debug_image
+
+        if not data:
+            await ctx.reply(
+                "Attach a shard screenshot or rerun after scanning an image so I can reuse the last capture.",
+                mention_author=False,
+            )
+            return
+
+        try:
+            await ctx.typing()
+        except Exception:
+            pass
+
+        bundle = await asyncio.to_thread(collect_debug_bundle, data, 8)
+        if not bundle:
+            await ctx.reply("OCR pipeline is unavailable or failed to process the image.", mention_author=False)
+            return
+
+        counts_line = self._fmt_counts_line(bundle.counts)
+        embed = discord.Embed(
+            title="OCR Debug",
+            description=(
+                f"ROI ratio **{bundle.ratio:.2f}** · bands detected **{max(bundle.score, 0)}/5**\n"
+                f"Counts → {counts_line}"
+            ),
+            color=discord.Color.blurple(),
+            timestamp=datetime.now(UTC),
+        )
+
+        files: List[discord.File] = []
+        for band in bundle.bands:
+            label = band.shard.value.title()
+            text_raw = band.text or ""
+            safe_text = text_raw.replace("`", "\`") or "∅"
+            conf_display = "n/a" if band.conf < 0 else f"{band.conf:.1f}"
+            oem_display = "—" if band.oem < 0 else str(band.oem)
+            psm_display = "—" if band.psm < 0 else str(band.psm)
+            mode = "fallback" if band.aggressive else "primary"
+            cfg_summary = band.config_summary or "—"
+            embed.add_field(
+                name=f"{label} ({band.width}×{band.height})",
+                value=(
+                    f"Mode: **{mode}** · band #{band.band_index + 1}\n"
+                    f"Processed: `{band.processed_label}` · OEM/PSM: `{oem_display}/{psm_display}`\n"
+                    f"Config: `{cfg_summary}`\n"
+                    f"Raw: `{safe_text}` (conf {conf_display})"
+                ),
+                inline=False,
+            )
+
+            roi_filename = f"roi_{band.band_index + 1}_{band.shard.value}.png"
+            prep_filename = f"prep_{band.band_index + 1}_{band.shard.value}.png"
+            if band.raw_bytes:
+                files.append(discord.File(io.BytesIO(band.raw_bytes), filename=roi_filename))
+            if band.processed_bytes:
+                files.append(discord.File(io.BytesIO(band.processed_bytes), filename=prep_filename))
+
+        await ctx.reply(embed=embed, files=files or None, mention_author=False)
+
     @commands.command(name="ocr")
     async def ocr_cmd(self, ctx: commands.Context, sub: Optional[str] = None):
         """
@@ -360,10 +490,11 @@ class ShardsCog(commands.Cog):
             if not info:
                 await ctx.reply("OCR runtime info unavailable (pytesseract/Pillow not importable).", mention_author=False)
                 return
+            langs = info.get("tesseract_languages") or "—"
             await ctx.reply(
-                f"Tesseract: **{info.get('tesseract_version','?')}** | "
-                f"pytesseract: **{info.get('pytesseract_version','?')}** | "
-                f"Pillow: **{info.get('pillow_version','?')}**",
+                f"Tesseract lib: **{info.get('tesseract_version','?')}** | CLI: **{info.get('tesseract_cli_version','?')}**\n"
+                f"pytesseract: **{info.get('pytesseract_version','?')}** | Pillow: **{info.get('pillow_version','?')}**\n"
+                f"Languages: `{langs}`",
                 mention_author=False,
             )
             return
