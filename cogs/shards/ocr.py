@@ -681,8 +681,14 @@ def _read_counts_from_roi_impl(
         except Exception:
             micro_pick = None
 
+        def _score_pick(pick: Optional[Tuple[str, float, str]]) -> Tuple[int, float]:
+            if not pick:
+                return (-1, -1.0)
+            txt, conf, _ = pick
+            return _score_band_token(txt, conf)
+
         best_pick = main_pick
-        if _score_band_token(*(micro_pick or ("", -1.0))) > _score_band_token(*(best_pick or ("", -1.0))):
+        if _score_pick(micro_pick) > _score_pick(best_pick):
             best_pick = micro_pick
 
         if best_pick is None:
