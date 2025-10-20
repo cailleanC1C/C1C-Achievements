@@ -10,13 +10,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         tesseract-ocr \
+        tesseract-ocr-eng \
         libtesseract-dev \
         libleptonica-dev \
         gcc \
         libjpeg62-turbo-dev \
         zlib1g-dev \
         libpng-dev \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+ENV TESSDATA_PREFIX=/usr/share/tesseract-ocr/4.00/tessdata
 
 # ---- app ----
 WORKDIR /app

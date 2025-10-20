@@ -60,6 +60,9 @@ Typing a bare command like `!health` prompts you to pick which bot you mean.
 * `!sc reload` — Reload configuration from Sheets or local file.
 * `!sc checksheet` — Show which Google Sheet (or local file) is active.
 * `!sc env` — Show key environment variables (secrets redacted).
+* `!ocr info` — Print Tesseract / pytesseract / Pillow versions plus installed languages.
+* `!ocr selftest` — Render “12345”, OCR it, and report the raw text + latency.
+* `!ocrdebug` — (feature toggled, staff-only) attach a shard screenshot to see the band crops, preprocessing, and raw OCR output.
 
 ### Guardian Knight & Claim Flow
 
@@ -93,6 +96,11 @@ Typing a bare command like `!health` prompts you to pick which bot you mean.
 * **Audit entries missing:** make sure the role name is flagged for logging in the sheet.
 * **Guardian Knight commands not working:** confirm the correct role ID is set for Guardian Knights.
 * **Still stuck?** Use `!sc health` to see if the bot can read your sheet and channels.
+
+### Feature toggles
+
+* `ENABLE_OCR_DEBUG` — defaults to `false`. When `true`, registers `!ocrdebug` for approved test guilds.
+* `OCR_DEBUG_GUILD_IDS` — comma-separated guild IDs allowed to run `!ocrdebug` (e.g., `123,456`).
 
 ---
 
