@@ -102,7 +102,9 @@ class ShardsCog(commands.Cog):
     # --- OCR helper (reads the attachment and returns {ShardType:int}) ---
     async def _ocr_prefill_from_attachment(self, att: discord.Attachment) -> Dict[ShardType, int]:
         try:
-            data = await att.read()
+            data = await self._read_attachment_bytes(att)
+            if not data:
+                raise RuntimeError("attachment read returned no data")
             self._last_debug_image = data
             counts = await asyncio.to_thread(extract_counts_from_image_bytes, data) or {}
             # normalize missing keys so the preview always has all five
@@ -111,6 +113,68 @@ class ShardsCog(commands.Cog):
             return counts
         except Exception:
             return {st: 0 for st in ShardType}
+
+    async def _read_attachment_bytes(self, att: discord.Attachment, timeout: float = 10.0) -> Optional[bytes]:
+        try:
+            return await asyncio.wait_for(att.read(), timeout=timeout)
+        except asyncio.TimeoutError:
+            log.warning("[ocrdebug] timed out reading attachment %s", getattr(att, "id", "?"))
+            return None
+        except Exception:
+            log.warning("[ocrdebug] failed to read attachment %s", getattr(att, "id", "?"), exc_info=True)
+            return None
+
+    async def _resolve_debug_image_bytes(self, ctx: commands.Context) -> Optional[bytes]:
+        """Resolve an image for OCR debug following attachment/reply/history priority."""
+        # 1) attachment on the command message
+        for att in getattr(ctx.message, "attachments", []):
+            if _is_image_attachment(att):
+                data = await self._read_attachment_bytes(att)
+                if data:
+                    self._last_debug_image = data
+                    return data
+
+        # 2) attachment on the replied-to message
+        reference = getattr(ctx.message, "reference", None)
+        resolved_msg: Optional[discord.Message] = None
+        if reference:
+            resolved = getattr(reference, "resolved", None)
+            if isinstance(resolved, discord.Message):
+                resolved_msg = resolved
+            elif reference.message_id and getattr(ctx, "channel", None):
+                try:
+                    resolved_msg = await ctx.channel.fetch_message(reference.message_id)
+                except Exception:
+                    resolved_msg = None
+        if resolved_msg:
+            for att in getattr(resolved_msg, "attachments", []):
+                if _is_image_attachment(att):
+                    data = await self._read_attachment_bytes(att)
+                    if data:
+                        self._last_debug_image = data
+                        return data
+
+        # 3) scan recent history (bounded)
+        channel = getattr(ctx, "channel", None)
+        if channel is not None:
+            try:
+                async for msg in channel.history(limit=30):
+                    if msg.id == ctx.message.id:
+                        continue
+                    for att in getattr(msg, "attachments", []):
+                        if _is_image_attachment(att):
+                            data = await self._read_attachment_bytes(att)
+                            if data:
+                                self._last_debug_image = data
+                                return data
+            except Exception:
+                log.warning("[ocrdebug] failed to inspect recent channel history", exc_info=True)
+
+        # 4) fallback to the last cached debug image if any
+        if self._last_debug_image:
+            log.info("[ocrdebug] using cached image from last run")
+            return self._last_debug_image
+        return None
 
     # ---------- UTIL: formatting ----------
     def _emoji_or_abbr(self, st: ShardType) -> str:
@@ -384,21 +448,24 @@ class ShardsCog(commands.Cog):
             await ctx.reply("You need Manage Server or a staff override role to run this.", mention_author=False)
             return
 
-        images = [a for a in ctx.message.attachments if _is_image_attachment(a)]
-        data: Optional[bytes] = None
-        if images:
-            try:
-                data = await images[0].read()
-                self._last_debug_image = data
-            except Exception:
-                data = None
+        chan_name = getattr(ctx.channel, "name", None) or getattr(ctx.channel, "id", "?")
+        log.info(
+            "[ocrdebug] invoked by %s (%s) in %s", str(ctx.author), getattr(ctx.author, "id", "?"), chan_name
+        )
 
-        if data is None:
-            data = self._last_debug_image
+        try:
+            data = await self._resolve_debug_image_bytes(ctx)
+        except Exception:
+            log.exception("[ocrdebug] failed while resolving an image source")
+            await ctx.reply(
+                "OCR debug failed to load an image. Attach a shard screenshot or reply to one and try again.",
+                mention_author=False,
+            )
+            return
 
         if not data:
             await ctx.reply(
-                "Attach a shard screenshot or rerun after scanning an image so I can reuse the last capture.",
+                "No image found. Attach a shard screenshot, reply to one, or rerun soon after scanning an image.",
                 mention_author=False,
             )
             return
