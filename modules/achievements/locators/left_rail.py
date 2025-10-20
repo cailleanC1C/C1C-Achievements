@@ -1,0 +1,140 @@
+"""Icon locator for the achievements left rail."""
+
+from __future__ import annotations
+
+import logging
+import os
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Sequence, Tuple
+
+import cv2
+import numpy as np
+
+log = logging.getLogger("c1c.achievements.ocr")
+
+
+@dataclass
+class TileHit:
+    """Descriptor for a located achievements tile."""
+
+    name: str
+    x: int
+    y: int
+    w: int
+    h: int
+    score: float
+
+
+TILE_ORDER: Sequence[str] = ("Mystery", "Ancient", "Void", "Primal", "Sacred")
+
+# Number ROI as % of estimated tile bbox (x%, y%, w%, h%)
+NUMBER_ROI: Dict[str, Tuple[int, int, int, int]] = {
+    "Mystery": (6, 74, 35, 20),
+    "Ancient": (6, 74, 28, 20),
+    "Void": (6, 74, 28, 20),
+    "Primal": (6, 74, 28, 20),
+    "Sacred": (6, 74, 28, 20),
+}
+
+
+def _asset_path(fname: str) -> str:
+    here = os.path.dirname(__file__)
+    return os.path.abspath(os.path.join(here, "..", "assets", "ocr", "icons", fname))
+
+
+def load_templates() -> Dict[str, np.ndarray]:
+    """
+    Load icon templates from disk.
+
+    Missing or unreadable files are logged and skipped.
+    """
+
+    files = {
+        "Mystery": _asset_path("mystery.png"),
+        "Ancient": _asset_path("ancient.png"),
+        "Void": _asset_path("void.png"),
+        "Primal": _asset_path("primal.png"),
+        "Sacred": _asset_path("sacred.png"),
+    }
+    templates: Dict[str, np.ndarray] = {}
+    for name, path in files.items():
+        if os.path.exists(path):
+            image = cv2.imread(path, cv2.IMREAD_COLOR)
+            if image is not None:
+                templates[name] = image
+                log.info("OCR template loaded: %s (%s)", name, path)
+            else:
+                log.warning("OCR template unreadable: %s (%s)", name, path)
+        else:
+            log.warning("OCR template missing: %s (%s)", name, path)
+    return templates
+
+
+def match_icons(
+    full_img: np.ndarray,
+    templates: Dict[str, np.ndarray],
+    scales: Sequence[float] = (0.60, 0.70, 0.80, 0.90, 1.00, 1.10, 1.20, 1.30, 1.40),
+    thresh: float = 0.78,
+) -> List[TileHit]:
+    """Run multi-scale template matching for each icon."""
+
+    hits: List[TileHit] = []
+    if not templates:
+        return hits
+
+    for name in TILE_ORDER:
+        template = templates.get(name)
+        if template is None:
+            continue
+
+        best: Optional[TileHit] = None
+        for scale in scales:
+            tw = max(10, int(template.shape[1] * scale))
+            th = max(10, int(template.shape[0] * scale))
+            resized = cv2.resize(template, (tw, th), interpolation=cv2.INTER_AREA)
+            result = cv2.matchTemplate(full_img, resized, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, max_loc = cv2.minMaxLoc(result)
+            if max_val < thresh:
+                continue
+
+            x, y = max_loc
+            candidate = TileHit(name=name, x=x, y=y, w=tw, h=th, score=float(max_val))
+            if best is None or candidate.score > best.score:
+                best = candidate
+
+        if best:
+            hits.append(best)
+
+    hits.sort(key=lambda hit: hit.y)
+    log.info("OCR template matches: %s", [(hit.name, round(hit.score, 3)) for hit in hits])
+    return hits
+
+
+def tiles_to_number_rois(
+    full_img: np.ndarray, hits: Sequence[TileHit]
+) -> List[Tuple[str, np.ndarray, Tuple[int, int, int, int]]]:
+    """Return cropped number regions for each located tile."""
+
+    height, width = full_img.shape[:2]
+    output: List[Tuple[str, np.ndarray, Tuple[int, int, int, int]]] = []
+    for hit in hits:
+        # estimate tile bbox from icon bbox
+        tile_h = int(hit.h * 1.9)
+        tile_w = int(hit.w * 2.1)
+        tile_x = max(0, hit.x - int(hit.w * 0.25))
+        tile_y = max(0, hit.y - int(hit.h * 0.35))
+        tile_x2 = min(width, tile_x + tile_w)
+        tile_y2 = min(height, tile_y + tile_h)
+
+        rx, ry, rw, rh = NUMBER_ROI.get(hit.name, (6, 74, 30, 20))
+        number_x = tile_x + int((rx / 100) * (tile_x2 - tile_x))
+        number_y = tile_y + int((ry / 100) * (tile_y2 - tile_y))
+        number_w = int((rw / 100) * (tile_x2 - tile_x))
+        number_h = int((rh / 100) * (tile_y2 - tile_y))
+        number_x2 = min(width, number_x + number_w)
+        number_y2 = min(height, number_y + number_h)
+
+        roi = full_img[number_y:number_y2, number_x:number_x2]
+        output.append((hit.name, roi, (number_x, number_y, number_x2 - number_x, number_y2 - number_y)))
+
+    return output
