@@ -39,19 +39,6 @@ def _env_truthy(name: str, default: bool = False) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "on", "y"}
 
 
-def _parse_id_set(raw: str) -> set[int]:
-    ids: set[int] = set()
-    for part in raw.replace(";", ",").split(","):
-        chunk = part.strip()
-        if not chunk:
-            continue
-        try:
-            ids.add(int(chunk))
-        except Exception:
-            continue
-    return ids
-
-
 def _is_image_attachment(att: discord.Attachment) -> bool:
     """Lenient check for images (content-type or filename)."""
     ct = (att.content_type or "").lower().split(";")[0].strip()
@@ -68,7 +55,6 @@ class ShardsCog(commands.Cog):
         self._live_views: Dict[int, discord.ui.View] = {}  # keep views referenced until timeout
         self._ocr_cache: Dict[tuple[int, int, int], Dict[ShardType, int]] = {}  # (guild_id, channel_id, msg_id) -> counts
         self._ocr_debug_enabled = _env_truthy("ENABLE_OCR_DEBUG", False)
-        self._ocr_debug_guilds = _parse_id_set(os.getenv("OCR_DEBUG_GUILD_IDS", ""))
         self._last_debug_image: Optional[bytes] = None
 
         # Log OCR stack once for visibility
@@ -91,9 +77,8 @@ class ShardsCog(commands.Cog):
             log.exception("[ocr] failed to query OCR runtime info")
 
         log.info(
-            "[ocr] debug command enabled=%s guilds=%s",
+            "[ocr] debug command enabled=%s (guild allow-list disabled for Achievements bot)",
             self._ocr_debug_enabled,
-            ",".join(str(g) for g in sorted(self._ocr_debug_guilds)) or "—",
         )
 
     # ---------- GUARDS ----------
@@ -386,10 +371,6 @@ class ShardsCog(commands.Cog):
     async def ocr_debug_cmd(self, ctx: commands.Context):
         if not self._ocr_debug_enabled:
             await ctx.reply("OCR debug command is disabled. Ask an admin to enable ENABLE_OCR_DEBUG.", mention_author=False)
-            return
-
-        if ctx.guild is None or ctx.guild.id not in self._ocr_debug_guilds:
-            await ctx.reply("OCR debug is only available in approved test guilds.", mention_author=False)
             return
 
         member = ctx.author if isinstance(ctx.author, discord.Member) else None
