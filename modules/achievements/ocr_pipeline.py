@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
@@ -9,6 +10,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 import pytesseract
+
+log = logging.getLogger("c1c-claims")
 
 from .locators.left_rail import (
     corners_to_number_rois,
@@ -31,6 +34,7 @@ __all__ = [
 ]
 
 DEFAULT_CONFIG = "--oem 1 --psm 7 -c tessedit_char_whitelist=0123456789."
+CONF_FLOOR = 35  # minimum confidence for a digit fragment to be trusted
 
 # Order of shard counters as they appear in the in-game UI from top to bottom.
 BAND_ORDER: Tuple[str, ...] = ("Mystery", "Ancient", "Void", "Primal", "Sacred")
@@ -47,6 +51,44 @@ def _looks_like_number(text: str) -> bool:
     if not cleaned:
         return False
     return bool(_NUM_RE.match(cleaned))
+
+
+def _prep_bin(img_np: np.ndarray) -> np.ndarray:
+    """Binarise a ROI for OCR (white digits on a dark background)."""
+
+    if img_np is None or img_np.size == 0:
+        raise ValueError("`img_np` must be a non-empty ndarray")
+
+    if img_np.ndim == 3:
+        gray = cv2.cvtColor(img_np, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = img_np
+
+    gray = cv2.medianBlur(gray, 3)
+    return cv2.adaptiveThreshold(
+        gray,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        31,
+        9,
+    )
+
+
+def _lenient_digits(bin_or_gray: np.ndarray) -> str:
+    """Run a relaxed OCR pass to rescue digits filtered out by confidence checks."""
+
+    if bin_or_gray is None or bin_or_gray.size == 0:
+        return ""
+
+    config = "--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789,"
+    try:
+        raw = pytesseract.image_to_string(bin_or_gray, lang="eng", config=config) or ""
+    except Exception:
+        return ""
+
+    raw = raw.replace(",", "")
+    return re.sub(r"\D+", "", raw)
 
 
 @dataclass(slots=True)
@@ -204,6 +246,127 @@ def find_counter_rois(full_img: np.ndarray) -> List[Tuple[str, np.ndarray]]:
     return _legacy_find_counter_rois(full_img)
 
 
+def _read_int(name: str, roi_np: np.ndarray) -> Tuple[int, float, str]:
+    """Read a numeric ROI and return value, mean confidence and raw text."""
+
+    if roi_np is None or roi_np.size == 0:
+        return 0, 0.0, ""
+
+    try:
+        binimg = _prep_bin(roi_np)
+    except Exception:
+        return 0, 0.0, ""
+
+    config = "--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789,"
+    try:
+        data = pytesseract.image_to_data(
+            binimg,
+            lang="eng",
+            config=config,
+            output_type=pytesseract.Output.DICT,
+        )
+    except Exception:
+        return 0, 0.0, ""
+
+    texts: List[str] = []
+    confs: List[float] = []
+    all_texts: List[str] = []
+    all_confs: List[float] = []
+
+    for text, conf in zip(data.get("text", []), data.get("conf", [])):
+        if not text:
+            continue
+        cleaned = text.strip()
+        if not cleaned:
+            continue
+        try:
+            score = float(conf)
+        except Exception:
+            score = -1.0
+
+        all_texts.append(cleaned)
+        all_confs.append(score)
+
+        if score < CONF_FLOOR:
+            continue
+
+        texts.append(cleaned)
+        confs.append(score)
+
+    strict_raw = "".join(texts)
+    strict_raw = strict_raw.replace(" ", "").replace(",", "")
+
+    kept = len(texts)
+    total = len(all_texts)
+
+    cand_a = strict_raw
+    conf_a = float(np.mean(confs)) if confs else 0.0
+
+    cand_b = ""
+    conf_b = 0.0
+
+    if total > 0 and kept < total:
+        cand_b = _lenient_digits(binimg)
+        conf_b = float(np.mean([c for c in all_confs if c >= 0])) if all_confs else 0.0
+        log.info(
+            "[ocr] %s: lenient fallback considered (kept=%d/%d, strict='%s', loose='%s')",
+            name,
+            kept,
+            total,
+            cand_a,
+            cand_b,
+        )
+
+    def _score(raw: str, confidence: float) -> Tuple[int, float]:
+        return len(raw or ""), confidence
+
+    best_raw = cand_a
+    best_conf = conf_a
+
+    if cand_b and _score(cand_b, conf_b) > _score(cand_a, conf_a):
+        best_raw = cand_b
+        best_conf = conf_b
+        log.info(
+            "[ocr] %s: using lenient result '%s' over strict '%s'", name, best_raw, cand_a
+        )
+
+    value = int(best_raw) if best_raw.isdigit() else 0
+    return value, best_conf, best_raw
+
+
+def _read_band(name: str, roi: np.ndarray) -> Tuple[int, float, str, Dict[str, Any]]:
+    """Read a band ROI, applying confidence filtering and legacy fallbacks."""
+
+    value, mean_conf, raw = _read_int(name, roi)
+    text = raw
+    confidence = mean_conf
+    metadata: Dict[str, Any] = {
+        "band_name": name,
+        "reader": "data",
+        "data_raw": raw,
+        "data_conf": mean_conf,
+    }
+
+    if value == 0 and not raw:
+        try:
+            prep = preprocess_for_ocr(roi, band_name=name)
+            fallback_text = tesseract_read(prep, band_name=name)
+        except Exception:
+            fallback_text = ""
+
+        metadata["legacy_raw"] = fallback_text
+        parsed = normalize_count(fallback_text)
+        if parsed is not None:
+            value = parsed
+            text = fallback_text
+            confidence = -1.0
+            metadata["reader"] = "legacy"
+
+    metadata["value"] = value
+    metadata["text"] = text
+    return value, confidence, text, metadata
+
+
 def read_counters(full_img: np.ndarray) -> Dict[str, Any]:
     """Read all shard counters from the provided screenshot."""
 
@@ -211,16 +374,14 @@ def read_counters(full_img: np.ndarray) -> Dict[str, Any]:
     bands: List[OcrBand] = []
 
     for name, roi in find_counter_rois(full_img):
-        prep = preprocess_for_ocr(roi, band_name=name)
-        text = tesseract_read(prep, band_name=name)
-        parsed = normalize_count(text)
-        results[name] = parsed if parsed is not None else 0
+        value, confidence, text, metadata = _read_band(name, roi)
+        results[name] = int(value)
         bands.append(
             OcrBand(
                 name=name,
-                text=text,
-                confidence=-1.0,
-                metadata={"band_name": name},
+                text=text or "",
+                confidence=confidence,
+                metadata=metadata,
             )
         )
 
@@ -231,9 +392,24 @@ async def collect_debug_fields(full_img: np.ndarray) -> List[Tuple[str, str]]:
     """Generate embed-friendly fields describing the OCR pass."""
 
     fields: List[Tuple[str, str]] = []
+    loop = asyncio.get_running_loop()
     for name, roi in find_counter_rois(full_img):
-        prep_img = preprocess_for_ocr(roi, band_name=name)
-        text = await _tesseract_ocr_async(prep_img, band_name=name)
-        note = " (sacred-tuned)" if name.lower().startswith("sacred") else ""
-        fields.append((name, f"Raw{note}: `{text or '∅'}`"))
+        _, confidence, text, metadata = await loop.run_in_executor(
+            None, _read_band, name, roi
+        )
+        reader = metadata.get("reader", "data")
+        display = text or "∅"
+        if reader == "legacy":
+            data_raw = metadata.get("data_raw") or "∅"
+            data_conf = metadata.get("data_conf", 0.0)
+            extras: List[str] = []
+            if data_raw and data_raw != "∅":
+                extras.append(f"data `{data_raw}`")
+            if data_conf > 0:
+                extras.append(f"μ={data_conf:.1f}")
+            extra = f" ({', '.join(extras)})" if extras else ""
+            fields.append((name, f"Legacy: `{display}`{extra}"))
+        else:
+            conf_note = f" μ={confidence:.1f}" if confidence > 0 else ""
+            fields.append((name, f"Digits{conf_note}: `{display}`"))
     return fields
