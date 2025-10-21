@@ -77,8 +77,19 @@ def load_templates() -> Dict[str, np.ndarray]:
 def match_icons(
     full_img: np.ndarray,
     templates: Dict[str, np.ndarray],
-    scales: Sequence[float] = (0.60, 0.70, 0.80, 0.90, 1.00, 1.10, 1.20, 1.30, 1.40),
-    thresh: float = 0.78,
+    scales: Sequence[float] = (
+        0.60,
+        0.70,
+        0.80,
+        0.90,
+        1.00,
+        1.10,
+        1.20,
+        1.30,
+        1.40,
+        1.50,
+    ),
+    thresh: float = 0.65,
 ) -> List[TileHit]:
     """Run multi-scale template matching for each icon."""
 
@@ -86,17 +97,33 @@ def match_icons(
     if not templates:
         return hits
 
+    # Work in grayscale for stable correlation across hue changes and glow
+    if full_img.ndim == 3:
+        color_code = cv2.COLOR_BGRA2GRAY if full_img.shape[2] == 4 else cv2.COLOR_BGR2GRAY
+        hay = cv2.cvtColor(full_img, color_code)
+    else:
+        hay = full_img.copy()
+
     for name in TILE_ORDER:
         template = templates.get(name)
         if template is None:
             continue
 
+        # Templates are also normalized to grayscale to avoid color variance issues
+        if template.ndim == 3:
+            tpl_color = cv2.COLOR_BGRA2GRAY if template.shape[2] == 4 else cv2.COLOR_BGR2GRAY
+            tpl_gray = cv2.cvtColor(template, tpl_color)
+        else:
+            tpl_gray = template
+
         best: Optional[TileHit] = None
         for scale in scales:
-            tw = max(10, int(template.shape[1] * scale))
-            th = max(10, int(template.shape[0] * scale))
-            resized = cv2.resize(template, (tw, th), interpolation=cv2.INTER_AREA)
-            result = cv2.matchTemplate(full_img, resized, cv2.TM_CCOEFF_NORMED)
+            tw = max(10, int(tpl_gray.shape[1] * scale))
+            th = max(10, int(tpl_gray.shape[0] * scale))
+            resized = cv2.resize(tpl_gray, (tw, th), interpolation=cv2.INTER_AREA)
+            if hay.shape[0] < th or hay.shape[1] < tw:
+                continue
+            result = cv2.matchTemplate(hay, resized, cv2.TM_CCOEFF_NORMED)
             _, max_val, _, max_loc = cv2.minMaxLoc(result)
             if max_val < thresh:
                 continue
@@ -108,17 +135,34 @@ def match_icons(
 
         if best:
             hits.append(best)
+        log.info(
+            "OCR icon match %s: best=%.3f scale≈%.2f",
+            name,
+            best.score if best else -1.0,
+            (best.w / tpl_gray.shape[1]) if best else -1.0,
+        )
 
     hits.sort(key=lambda hit: hit.y)
-    log.info("OCR template matches: %s", [(hit.name, round(hit.score, 3)) for hit in hits])
+    log.info("OCR icon matches: %s", [(hit.name, round(hit.score, 3)) for hit in hits])
     return hits
 
 
 def match_corners(
     full_img: np.ndarray,
     templates: Dict[str, np.ndarray],
-    scales: Sequence[float] = (0.70, 0.80, 0.90, 1.00, 1.10, 1.20, 1.30),
-    thresh: float = 0.75,
+    scales: Sequence[float] = (
+        0.60,
+        0.70,
+        0.80,
+        0.90,
+        1.00,
+        1.10,
+        1.20,
+        1.30,
+        1.40,
+        1.50,
+    ),
+    thresh: float = 0.65,
 ) -> List[TileHit]:
     """Run template matching using the corner crops supplied by the user."""
 
@@ -126,17 +170,32 @@ def match_corners(
     if not templates:
         return hits
 
+    # Grayscale matching is more robust for user-supplied corner crops
+    if full_img.ndim == 3:
+        color_code = cv2.COLOR_BGRA2GRAY if full_img.shape[2] == 4 else cv2.COLOR_BGR2GRAY
+        hay = cv2.cvtColor(full_img, color_code)
+    else:
+        hay = full_img.copy()
+
     for name in TILE_ORDER:
         template = templates.get(name)
         if template is None:
             continue
 
+        if template.ndim == 3:
+            tpl_color = cv2.COLOR_BGRA2GRAY if template.shape[2] == 4 else cv2.COLOR_BGR2GRAY
+            tpl_gray = cv2.cvtColor(template, tpl_color)
+        else:
+            tpl_gray = template
+
         best: Optional[TileHit] = None
         for scale in scales:
-            tw = max(10, int(template.shape[1] * scale))
-            th = max(10, int(template.shape[0] * scale))
-            resized = cv2.resize(template, (tw, th), interpolation=cv2.INTER_AREA)
-            result = cv2.matchTemplate(full_img, resized, cv2.TM_CCOEFF_NORMED)
+            tw = max(10, int(tpl_gray.shape[1] * scale))
+            th = max(10, int(tpl_gray.shape[0] * scale))
+            resized = cv2.resize(tpl_gray, (tw, th), interpolation=cv2.INTER_AREA)
+            if hay.shape[0] < th or hay.shape[1] < tw:
+                continue
+            result = cv2.matchTemplate(hay, resized, cv2.TM_CCOEFF_NORMED)
             _, max_val, _, max_loc = cv2.minMaxLoc(result)
             if max_val < thresh:
                 continue
@@ -148,6 +207,12 @@ def match_corners(
 
         if best:
             hits.append(best)
+        log.info(
+            "OCR corner match %s: best=%.3f scale≈%.2f",
+            name,
+            best.score if best else -1.0,
+            (best.w / tpl_gray.shape[1]) if best else -1.0,
+        )
 
     hits.sort(key=lambda hit: hit.y)
     log.info("OCR corner matches: %s", [(hit.name, round(hit.score, 3)) for hit in hits])
