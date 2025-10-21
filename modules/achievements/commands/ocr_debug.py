@@ -55,6 +55,7 @@ def build_left_rail_overlay(full_img: np.ndarray) -> Optional[bytes]:
 
     vis = full_img.copy()
     if overlays:
+        log.info("[ocrdebug] sending overlay with %d ROI boxes", len(overlays))
         for name, _roi, (x, y, w, h) in overlays:
             cv2.rectangle(vis, (x, y), (x + w, y + h), (0, 255, 0), 2)
             cv2.putText(
@@ -68,6 +69,11 @@ def build_left_rail_overlay(full_img: np.ndarray) -> Optional[bytes]:
                 cv2.LINE_AA,
             )
     else:
+        log.info(
+            "[ocrdebug] sending overlay with NO boxes (mode=%s, icons=%d)",
+            locator_mode,
+            icon_count,
+        )
         cv2.putText(
             vis,
             f"no matches (mode={locator_mode}, icons={icon_count})",

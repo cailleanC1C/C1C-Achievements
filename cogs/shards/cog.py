@@ -519,7 +519,8 @@ class ShardsCog(commands.Cog):
             timestamp=datetime.now(UTC),
         )
 
-        files: List[discord.File] = []
+        skipped_raw = 0
+        skipped_processed = 0
         for band in bundle.bands:
             label = band.shard.value.title()
             text_raw = band.text or ""
@@ -540,14 +541,19 @@ class ShardsCog(commands.Cog):
                 inline=False,
             )
 
-            roi_filename = f"roi_{band.band_index + 1}_{band.shard.value}.png"
-            prep_filename = f"prep_{band.band_index + 1}_{band.shard.value}.png"
             if band.raw_bytes:
-                files.append(discord.File(io.BytesIO(band.raw_bytes), filename=roi_filename))
+                skipped_raw += 1
             if band.processed_bytes:
-                files.append(discord.File(io.BytesIO(band.processed_bytes), filename=prep_filename))
+                skipped_processed += 1
 
-        await ctx.reply(embed=embed, files=_with_overlay(files), mention_author=False)
+        if skipped_raw or skipped_processed:
+            log.info(
+                "[ocrdebug] skipped attaching %d raw and %d processed band images (overlay only)",
+                skipped_raw,
+                skipped_processed,
+            )
+
+        await ctx.reply(embed=embed, files=_with_overlay(), mention_author=False)
 
     @commands.command(name="ocrdiag")
     @commands.guild_only()
