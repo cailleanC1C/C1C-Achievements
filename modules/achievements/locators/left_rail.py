@@ -110,6 +110,46 @@ def match_icons(
     return hits
 
 
+def match_corners(
+    full_img: np.ndarray,
+    templates: Dict[str, np.ndarray],
+    scales: Sequence[float] = (0.70, 0.80, 0.90, 1.00, 1.10, 1.20, 1.30),
+    thresh: float = 0.75,
+) -> List[TileHit]:
+    """Run template matching using the corner crops supplied by the user."""
+
+    hits: List[TileHit] = []
+    if not templates:
+        return hits
+
+    for name in TILE_ORDER:
+        template = templates.get(name)
+        if template is None:
+            continue
+
+        best: Optional[TileHit] = None
+        for scale in scales:
+            tw = max(10, int(template.shape[1] * scale))
+            th = max(10, int(template.shape[0] * scale))
+            resized = cv2.resize(template, (tw, th), interpolation=cv2.INTER_AREA)
+            result = cv2.matchTemplate(full_img, resized, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, max_loc = cv2.minMaxLoc(result)
+            if max_val < thresh:
+                continue
+
+            x, y = max_loc
+            candidate = TileHit(name=name, x=x, y=y, w=tw, h=th, score=float(max_val))
+            if best is None or candidate.score > best.score:
+                best = candidate
+
+        if best:
+            hits.append(best)
+
+    hits.sort(key=lambda hit: hit.y)
+    log.info("OCR corner matches: %s", [(hit.name, round(hit.score, 3)) for hit in hits])
+    return hits
+
+
 def tiles_to_number_rois(
     full_img: np.ndarray, hits: Sequence[TileHit]
 ) -> List[Tuple[str, np.ndarray, Tuple[int, int, int, int]]]:
@@ -123,6 +163,35 @@ def tiles_to_number_rois(
         tile_w = int(hit.w * 2.1)
         tile_x = max(0, hit.x - int(hit.w * 0.25))
         tile_y = max(0, hit.y - int(hit.h * 0.35))
+        tile_x2 = min(width, tile_x + tile_w)
+        tile_y2 = min(height, tile_y + tile_h)
+
+        rx, ry, rw, rh = NUMBER_ROI.get(hit.name, (6, 74, 30, 20))
+        number_x = tile_x + int((rx / 100) * (tile_x2 - tile_x))
+        number_y = tile_y + int((ry / 100) * (tile_y2 - tile_y))
+        number_w = int((rw / 100) * (tile_x2 - tile_x))
+        number_h = int((rh / 100) * (tile_y2 - tile_y))
+        number_x2 = min(width, number_x + number_w)
+        number_y2 = min(height, number_y + number_h)
+
+        roi = full_img[number_y:number_y2, number_x:number_x2]
+        output.append((hit.name, roi, (number_x, number_y, number_x2 - number_x, number_y2 - number_y)))
+
+    return output
+
+
+def corners_to_number_rois(
+    full_img: np.ndarray, hits: Sequence[TileHit]
+) -> List[Tuple[str, np.ndarray, Tuple[int, int, int, int]]]:
+    """Estimate tile bounds from corner hits and return number ROIs."""
+
+    height, width = full_img.shape[:2]
+    output: List[Tuple[str, np.ndarray, Tuple[int, int, int, int]]] = []
+    for hit in hits:
+        tile_w = int(hit.w * 3.2)
+        tile_h = int(hit.h * 1.7)
+        tile_x = max(0, hit.x - int(hit.w * 0.10))
+        tile_y = max(0, hit.y - int(hit.h * 0.10))
         tile_x2 = min(width, tile_x + tile_w)
         tile_y2 = min(height, tile_y + tile_h)
 
