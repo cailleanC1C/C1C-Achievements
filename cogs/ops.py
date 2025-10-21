@@ -23,6 +23,8 @@ from claims.ops import (
 # ⬇️ NEW: prefix guidance helper
 from claims.middleware.coreops_prefix import format_prefix_picker
 
+from shared import config as shared_config
+
 # Access the running main module (the monolith) for data/functions.
 app = importlib.import_module("__main__")
 
@@ -252,7 +254,8 @@ class OpsCog(commands.Cog):
             "WATCHDOG_CHECK_SEC": str(app.WATCHDOG_CHECK_SEC),
             "WATCHDOG_MAX_DISCONNECT_SEC": str(app.WATCHDOG_MAX_DISCONNECT_SEC),
         }
-        emb = build_env_embed(app.BOT_VERSION, env_info)
+        toggles = shared_config.get_feature_toggles()
+        emb = build_env_embed(app.BOT_VERSION, env_info, feature_toggles=toggles)
         await app.safe_send_embed(ctx, emb)
 
     @commands.command(name="build")

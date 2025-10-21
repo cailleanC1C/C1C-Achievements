@@ -136,8 +136,20 @@ def build_config_embed(bot_version: str, config_snapshot: dict) -> discord.Embed
     return e
 
 
-def build_env_embed(bot_version: str, env_info: dict) -> discord.Embed:
+def build_env_embed(bot_version: str, env_info: dict, feature_toggles: dict[str, bool] | None = None) -> discord.Embed:
     lines = [f"• {k}: **{v}**" for k, v in env_info.items()]
+
+    if feature_toggles is not None:
+        if lines:
+            lines.append("")
+        lines.append("Feature Toggles:")
+        if feature_toggles:
+            for name in sorted(feature_toggles.keys()):
+                state = "ON" if feature_toggles[name] else "OFF"
+                lines.append(f"  {name} = {state}")
+        else:
+            lines.append("  (none)")
+
     e = discord.Embed(title="Environment (sanitized)", description="\n".join(lines) or "—", color=discord.Color.blurple())
     e.set_footer(text=f"Bot v{bot_version} • CoreOps v1 • {_vienna_now_str()}")
     return e

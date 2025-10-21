@@ -13,6 +13,7 @@ from flask import Flask
 from aiohttp import ClientConnectorError
 
 from core.prefix import get_prefix
+from shared import config as shared_config
 
 BOT_VERSION = "1.0.1"
 
@@ -128,10 +129,13 @@ CATEGORIES: List[dict] = []
 ACHIEVEMENTS: Dict[str, dict] = {}
 LEVELS: List[dict] = []
 REASONS: Dict[str, str] = {}
+FEATURE_TOGGLE_DEFAULTS: Dict[str, bool] = {}
 CONFIG_META = {"source": "—", "loaded_at": None, "status": "cold", "last_error": None}
 CONFIG_READY = asyncio.Event()
 _AUTO_REFRESH_TASK: Optional[asyncio.Task] = None
 _INITIAL_CONFIG_TASK: Optional[asyncio.Task] = None
+
+shared_config.configure_feature_toggles(defaults=FEATURE_TOGGLE_DEFAULTS)
 
 # ---- claim lifecycle: first prompt message id -> "open" | "canceled" | "expired" | "closed"
 CLAIM_STATE: Dict[int, str] = {}
@@ -147,7 +151,7 @@ def _svc_creds():
 
 def _truthy(x) -> bool:
     if isinstance(x, bool): return x
-    return str(x or "").strip().lower() in ("true", "yes", "y", "1", "wahr")
+    return str(x or "").strip().lower() in ("true", "yes", "y", "1", "wahr", "on", "enabled")
 
 def _set_or_default(d: dict, key: str, default):
     val = d.get(key, default)
@@ -195,6 +199,30 @@ def _clean(text: Optional[str]) -> str:
     s = s.replace("\\n", "\n").replace("\r\n", "\n").replace("\r", "\n")
     return s
 
+def _rows_to_feature_toggles(rows: List[dict]) -> Dict[str, bool]:
+    toggles: Dict[str, bool] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name: Optional[str] = None
+        for key in ("name", "toggle", "feature", "key"):
+            val = row.get(key)
+            if val is not None:
+                s = _to_str(val).strip()
+                if s:
+                    name = s
+                    break
+        if not name:
+            continue
+        state_val = None
+        for key in ("enabled", "value", "on", "is_enabled", "enabled?"):
+            if key in row:
+                state_val = row.get(key)
+                break
+        toggles[name] = _truthy(state_val) if state_val is not None else False
+    return toggles
+
+
 def load_config():
     sid   = os.getenv("CONFIG_SHEET_ID", "").strip()
     local = os.getenv("LOCAL_CONFIG_XLSX", "").strip()
@@ -209,6 +237,8 @@ def load_config():
 
     CONFIG_META["status"] = "loading"
     CONFIG_META["last_error"] = None
+
+    shared_config.configure_feature_toggles(overrides={})
 
     if sid and gspread:
         try:
@@ -241,6 +271,18 @@ def load_config():
             except Exception:
                 LEVELS = []
             REASONS = {r["code"]: r["message"] for r in sh.worksheet("Reasons").get_all_records()}
+
+            toggle_rows: List[dict] = []
+            try:
+                ws = sh.worksheet("FeatureToggles")
+                toggle_rows = ws.get_all_records()
+            except Exception as exc:
+                if getattr(gspread, "WorksheetNotFound", None) and isinstance(exc, gspread.WorksheetNotFound):
+                    toggle_rows = []
+                else:
+                    log.warning(f"Feature toggles load failed: {exc}", exc_info=True)
+                    toggle_rows = []
+            shared_config.configure_feature_toggles(overrides=_rows_to_feature_toggles(toggle_rows))
 
             loaded = True
             source = "Google Sheets"
@@ -277,6 +319,16 @@ def load_config():
             except Exception:
                 LEVELS = []
             REASONS = {r["code"]: r["message"] for r in pd.read_excel(xl, "Reasons").to_dict("records")}
+
+            toggle_rows: List[dict] = []
+            try:
+                toggle_rows = pd.read_excel(xl, "FeatureToggles").to_dict("records")
+            except ValueError:
+                toggle_rows = []
+            except Exception as exc:
+                log.warning(f"Feature toggles load failed: {exc}", exc_info=True)
+                toggle_rows = []
+            shared_config.configure_feature_toggles(overrides=_rows_to_feature_toggles(toggle_rows))
 
             loaded = True
             source = "Excel file"
