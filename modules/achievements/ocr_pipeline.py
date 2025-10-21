@@ -10,6 +10,8 @@ import cv2
 import numpy as np
 import pytesseract
 
+from .locators.left_rail import load_templates, match_icons, tiles_to_number_rois
+
 __all__ = [
     "DEFAULT_CONFIG",
     "BAND_ORDER",
@@ -17,6 +19,7 @@ __all__ = [
     "preprocess_for_ocr",
     "tesseract_read",
     "find_counter_rois",
+    "find_counter_rois_with_boxes",
     "read_counters",
     "collect_debug_fields",
 ]
@@ -56,12 +59,14 @@ def preprocess_for_ocr(img: np.ndarray, band_name: Optional[str] = None) -> np.n
     if img is None or img.size == 0:
         raise ValueError("`img` must be a non-empty ndarray")
 
-    if len(img.shape) == 3:
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    if len(img.shape) == 2:
+        color = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
     else:
-        gray = img.copy()
+        color = img
 
-    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    upscaled = cv2.resize(color, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+    gray = cv2.cvtColor(upscaled, cv2.COLOR_BGR2GRAY)
+    gray = cv2.convertScaleAbs(gray, alpha=1.35, beta=10)
 
     block, C = 19, 2
     if band_name == "Sacred":
@@ -120,8 +125,27 @@ async def _tesseract_ocr_async(img_bw: np.ndarray, band_name: Optional[str] = No
     return await loop.run_in_executor(None, tesseract_read, img_bw, DEFAULT_CONFIG, band_name)
 
 
-def find_counter_rois(full_img: np.ndarray) -> List[Tuple[str, np.ndarray]]:
-    """Split the screenshot into vertical bands for the shard counters."""
+def normalize_count(raw: str) -> Optional[int]:
+    """Normalise OCR output (strip punctuation / whitespace) into an int."""
+
+    text = (raw or "").strip().rstrip(".")
+    if not text:
+        return None
+
+    digits = re.sub(r"[\s,\.]", "", text)
+    if not digits.isdigit():
+        return None
+    try:
+        return int(digits)
+    except Exception:
+        return None
+
+
+_TEMPLATE_CACHE: Optional[Dict[str, np.ndarray]] = None
+
+
+def _legacy_find_counter_rois(full_img: np.ndarray) -> List[Tuple[str, np.ndarray]]:
+    """Fallback ROI splitter using equal vertical bands (legacy behaviour)."""
 
     if full_img is None or full_img.size == 0:
         return []
@@ -141,6 +165,34 @@ def find_counter_rois(full_img: np.ndarray) -> List[Tuple[str, np.ndarray]]:
     return rois
 
 
+def _template_rois_with_boxes(full_img: np.ndarray) -> List[Tuple[str, np.ndarray, Tuple[int, int, int, int]]]:
+    global _TEMPLATE_CACHE
+    if _TEMPLATE_CACHE is None:
+        _TEMPLATE_CACHE = load_templates()
+
+    hits = match_icons(full_img, _TEMPLATE_CACHE or {})
+    return tiles_to_number_rois(full_img, hits)
+
+
+def find_counter_rois_with_boxes(full_img: np.ndarray) -> List[Tuple[str, np.ndarray, Tuple[int, int, int, int]]]:
+    """Return template-derived ROIs along with their bounding boxes when available."""
+
+    rois = _template_rois_with_boxes(full_img)
+    if len(rois) >= 3:
+        return rois
+    return []
+
+
+def find_counter_rois(full_img: np.ndarray) -> List[Tuple[str, np.ndarray]]:
+    """Return ROIs for each shard counter (template-based with legacy fallback)."""
+
+    template_rois = _template_rois_with_boxes(full_img)
+    if len(template_rois) >= 3:
+        return [(name, roi) for name, roi, _ in template_rois]
+
+    return _legacy_find_counter_rois(full_img)
+
+
 def read_counters(full_img: np.ndarray) -> Dict[str, Any]:
     """Read all shard counters from the provided screenshot."""
 
@@ -150,12 +202,8 @@ def read_counters(full_img: np.ndarray) -> Dict[str, Any]:
     for name, roi in find_counter_rois(full_img):
         prep = preprocess_for_ocr(roi, band_name=name)
         text = tesseract_read(prep, band_name=name)
-        value = text.rstrip(".")
-        try:
-            parsed = int(value) if value else 0
-        except Exception:
-            parsed = 0
-        results[name] = parsed
+        parsed = normalize_count(text)
+        results[name] = parsed if parsed is not None else 0
         bands.append(
             OcrBand(
                 name=name,
