@@ -62,7 +62,8 @@ def load_templates() -> Dict[str, np.ndarray]:
             image = cv2.imread(path, cv2.IMREAD_COLOR)
             if image is not None:
                 templates[name] = image
-                log.info("OCR template loaded: %s (%s)", name, path)
+                h, w = image.shape[:2]
+                log.info("OCR template loaded: %s (%s) size=%sx%s", name, path, w, h)
             else:
                 log.warning("OCR template unreadable: %s (%s)", name, path)
         else:
