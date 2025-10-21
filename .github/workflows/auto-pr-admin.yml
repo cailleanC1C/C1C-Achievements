@@ -30,11 +30,11 @@ jobs:
             const path = require('path');
             const { execFileSync } = require('child_process');
 
-            const DEFAULT_MILESTONE = 'Harmonize v1.0';
-            const LABELS_RELATIVE_PATH = '.github/labels/labels.json';
+            const DEFAULT_MILESTONE = 'Shards & Mercy (v1)';
+            const LABELS_RELATIVE_PATH = '.github/labels/harmonized.json';
             const labelsPath = path.join(process.env.GITHUB_WORKSPACE, LABELS_RELATIVE_PATH);
 
-            const want = new Set(['bot:matchmaker', 'bot:welcomecrew']);
+            const want = new Set(['bot:achievements']);
 
             const title = (pr.title || '').trim();
             if (/^AUDIT:/i.test(title)) {
@@ -139,7 +139,7 @@ jobs:
                   owner,
                   repo,
                   issue_number: pr.number,
-                  body: `Label '${name}' auto-created via API. Please run label sync to update .github/labels/labels.json.`
+                  body: `Label '${name}' auto-created via API. Please run label sync to update .github/labels/harmonized.json.`
                 });
               }
             };
