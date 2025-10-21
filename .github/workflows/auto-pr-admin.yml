@@ -1,0 +1,184 @@
+name: 97-auto-label & milestone PRs
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  pr_admin:
+    if: github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out PR branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.ref }}
+          persist-credentials: true
+      - name: Apply labels and milestone
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const { owner, repo } = context.repo;
+            const fs = require('fs');
+            const path = require('path');
+            const { execFileSync } = require('child_process');
+
+            const DEFAULT_MILESTONE = 'Harmonize v1.0';
+            const LABELS_RELATIVE_PATH = '.github/labels/labels.json';
+            const labelsPath = path.join(process.env.GITHUB_WORKSPACE, LABELS_RELATIVE_PATH);
+
+            const want = new Set(['bot:matchmaker', 'bot:welcomecrew']);
+
+            const title = (pr.title || '').trim();
+            if (/^AUDIT:/i.test(title)) {
+              want.add('AUDIT');
+            }
+
+            let milestoneTitle = DEFAULT_MILESTONE;
+            const body = pr.body || '';
+            const metaMatch = body.match(/\[meta\]([\s\S]*?)\[\/meta\]/i);
+            if (metaMatch) {
+              const metaBlock = metaMatch[1];
+              const labelsMatch = metaBlock.match(/^\s*labels:\s*(.+)$/im);
+              if (labelsMatch) {
+                labelsMatch[1]
+                  .split(',')
+                  .map(label => label.trim())
+                  .filter(Boolean)
+                  .forEach(label => want.add(label));
+              }
+              const milestoneMatch = metaBlock.match(/^\s*milestone:\s*(.+)$/im);
+              if (milestoneMatch) {
+                const extracted = milestoneMatch[1].trim();
+                if (extracted) {
+                  milestoneTitle = extracted;
+                }
+              }
+            }
+
+            if (!milestoneTitle) {
+              milestoneTitle = DEFAULT_MILESTONE;
+            }
+
+            const ensureLabel = async (name) => {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name });
+                return;
+              } catch (error) {
+                if (error.status !== 404) {
+                  throw error;
+                }
+              }
+
+              let spec = { color: 'cccccc', description: '' };
+              let attemptedSync = false;
+              let syncFailed = false;
+
+              try {
+                let existing = [];
+                try {
+                  const raw = await fs.promises.readFile(labelsPath, 'utf8');
+                  existing = JSON.parse(raw);
+                  if (!Array.isArray(existing)) {
+                    throw new Error('labels.json must contain an array');
+                  }
+                } catch (readError) {
+                  if (readError.code !== 'ENOENT') {
+                    attemptedSync = true;
+                    throw readError;
+                  }
+                  existing = [];
+                }
+
+                const already = existing.find(label => label.name === name);
+                if (already) {
+                  spec = {
+                    color: already.color || 'cccccc',
+                    description: already.description || ''
+                  };
+                } else {
+                  attemptedSync = true;
+                  existing.push({ name, color: spec.color, description: spec.description });
+                  existing.sort((a, b) => a.name.localeCompare(b.name));
+                  await fs.promises.mkdir(path.dirname(labelsPath), { recursive: true });
+                  await fs.promises.writeFile(labelsPath, JSON.stringify(existing, null, 2) + '\n');
+
+                  try {
+                    execFileSync('git', ['config', 'user.name', 'github-actions[bot]']);
+                    execFileSync('git', ['config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com']);
+                    execFileSync('git', ['add', LABELS_RELATIVE_PATH]);
+                    execFileSync('git', ['commit', '-m', `ci: sync labels.json (auto-create ${name})`]);
+                    execFileSync('git', ['push', 'origin', `HEAD:${pr.head.ref}`]);
+                  } catch (gitError) {
+                    syncFailed = true;
+                    core.warning(`Failed to sync labels.json for ${name}: ${gitError.message}`);
+                  }
+                }
+              } catch (fileError) {
+                syncFailed = true;
+                core.warning(`Unable to update labels.json for ${name}: ${fileError.message}`);
+              }
+
+              try {
+                await github.rest.issues.createLabel({ owner, repo, name, color: spec.color, description: spec.description });
+              } catch (createError) {
+                if (createError.status !== 422) {
+                  throw createError;
+                }
+              }
+
+              if (attemptedSync && syncFailed) {
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: pr.number,
+                  body: `Label '${name}' auto-created via API. Please run label sync to update .github/labels/labels.json.`
+                });
+              }
+            };
+
+            for (const label of want) {
+              await ensureLabel(label);
+            }
+
+            if (want.size > 0) {
+              await github.rest.issues.addLabels({
+                owner,
+                repo,
+                issue_number: pr.number,
+                labels: Array.from(want)
+              });
+            }
+
+            const getOrCreateMilestone = async (msTitle) => {
+              let milestones = await github.paginate(github.rest.issues.listMilestones, { owner, repo, state: 'open', per_page: 100 });
+              let found = milestones.find(m => m.title === msTitle);
+              if (!found) {
+                milestones = await github.paginate(github.rest.issues.listMilestones, { owner, repo, state: 'all', per_page: 100 });
+                found = milestones.find(m => m.title === msTitle);
+              }
+              if (found) {
+                return found;
+              }
+              const { data } = await github.rest.issues.createMilestone({ owner, repo, title: msTitle });
+              return data;
+            };
+
+            const milestone = await getOrCreateMilestone(milestoneTitle || DEFAULT_MILESTONE);
+
+            await github.rest.issues.update({
+              owner,
+              repo,
+              issue_number: pr.number,
+              milestone: milestone.number
+            });
+
+            core.info(`Applied labels: ${Array.from(want).join(', ')}`);
+            core.info(`Set milestone: ${milestone.title}`);
