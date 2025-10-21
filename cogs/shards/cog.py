@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import io
+import inspect
 import logging
 import os
 import time
-from typing import Dict, Optional, List
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, Optional, List
 
+import cv2
 import discord
+import numpy as np
 from discord.ext import commands
 
 from .constants import ShardType, Rarity, DISPLAY_ORDER
@@ -22,6 +26,8 @@ from .ocr import (
     ocr_runtime_info,
     ocr_smoke_test,
 )
+from modules.achievements.commands.ocr_debug import build_left_rail_overlay
+from modules.achievements.locators import left_rail as left_rail_loc
 
 UTC = timezone.utc
 log = logging.getLogger("c1c-claims")
@@ -475,9 +481,31 @@ class ShardsCog(commands.Cog):
         except Exception:
             pass
 
+        overlay_bytes: Optional[bytes] = None
+        try:
+            np_buf = np.frombuffer(data, dtype=np.uint8)
+            full_np = cv2.imdecode(np_buf, cv2.IMREAD_COLOR)
+            if full_np is not None:
+                overlay_bytes = build_left_rail_overlay(full_np)
+            else:
+                log.warning("[ocrdebug] failed to decode image for overlay")
+        except Exception:
+            log.exception("[ocrdebug] failed to build left rail overlay")
+
+        def _with_overlay(existing: Optional[List[discord.File]] = None) -> Optional[List[discord.File]]:
+            files = list(existing) if existing else []
+            if overlay_bytes:
+                buf = io.BytesIO(overlay_bytes)
+                files.append(discord.File(buf, filename="debug_left_rail.png"))
+            return files or None
+
         bundle = await asyncio.to_thread(collect_debug_bundle, data, 8)
         if not bundle:
-            await ctx.reply("OCR pipeline is unavailable or failed to process the image.", mention_author=False)
+            await ctx.reply(
+                "OCR pipeline is unavailable or failed to process the image.",
+                mention_author=False,
+                files=_with_overlay(),
+            )
             return
 
         counts_line = self._fmt_counts_line(bundle.counts)
@@ -519,7 +547,73 @@ class ShardsCog(commands.Cog):
             if band.processed_bytes:
                 files.append(discord.File(io.BytesIO(band.processed_bytes), filename=prep_filename))
 
-        await ctx.reply(embed=embed, files=files or None, mention_author=False)
+        await ctx.reply(embed=embed, files=_with_overlay(files), mention_author=False)
+
+    @commands.command(name="ocrdiag")
+    @commands.guild_only()
+    async def ocr_diag_cmd(self, ctx: commands.Context):
+        member = ctx.author if isinstance(ctx.author, discord.Member) else None
+        if member is None:
+            await ctx.reply("Guild-only command.", mention_author=False)
+            return
+
+        staff_roles = getattr(self.cfg, "roles_staff_override", [])
+        perms = member.guild_permissions
+        if not (perms.manage_guild or perms.administrator or _has_any_role(member, staff_roles)):
+            await ctx.reply("You need Manage Server or a staff override role to run this.", mention_author=False)
+            return
+
+        left_rail_path = Path(left_rail_loc.__file__).resolve()
+        icons_dir = left_rail_path.parent.parent / "assets" / "ocr" / "icons"
+
+        try:
+            templates = left_rail_loc.load_templates()
+        except Exception:
+            templates = {}
+            log.exception("[ocrdiag] failed to load templates")
+
+        try:
+            left_mtime = time.ctime(left_rail_path.stat().st_mtime)
+        except Exception:
+            left_mtime = "?"
+
+        has_corner = hasattr(left_rail_loc, "match_corners") and hasattr(left_rail_loc, "corners_to_number_rois")
+        if has_corner:
+            try:
+                corner_line = inspect.getsourcelines(left_rail_loc.match_corners)[1]
+            except Exception:
+                corner_line = "?"
+        else:
+            corner_line = "-"
+
+        lines = [
+            "**OCR Diagnostics**",
+            f"- left_rail.py: `{left_rail_path}` (mtime {left_mtime})",
+            f"- icons dir: `{icons_dir}` exists={icons_dir.exists()}",
+            f"- templates loaded: {len(templates)}",
+            f"- corner-match available: **{has_corner}** (def line {corner_line})",
+        ]
+
+        details: List[str] = []
+        for name in left_rail_loc.TILE_ORDER:
+            filename = f"{name.lower()}.png"
+            path = icons_dir / filename
+            tpl = templates.get(name)
+            dims = f"{tpl.shape[1]}×{tpl.shape[0]}" if tpl is not None else "—"
+            if path.exists():
+                try:
+                    size = path.stat().st_size
+                    size_text = f"{size} B"
+                except Exception:
+                    size_text = "exists"
+            else:
+                size_text = "missing"
+            details.append(f"{filename}: {size_text} | {dims}")
+
+        if details:
+            lines.append("```" + "\n".join(details) + "\n```")
+
+        await ctx.reply("\n".join(lines), mention_author=False)
 
     @commands.command(name="ocr")
     async def ocr_cmd(self, ctx: commands.Context, sub: Optional[str] = None):

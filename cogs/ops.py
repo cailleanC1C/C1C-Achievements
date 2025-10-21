@@ -1,8 +1,8 @@
 # cogs/ops.py
 # Registers CoreOps commands via a cog, delegating rendering to claims/ops.py.
 
-import os, json
-import importlib
+import os, json, pathlib, hashlib, time, platform
+import importlib, inspect
 import discord
 from discord.ext import commands
 import logging
@@ -254,6 +254,60 @@ class OpsCog(commands.Cog):
         }
         emb = build_env_embed(app.BOT_VERSION, env_info)
         await app.safe_send_embed(ctx, emb)
+
+    @commands.command(name="build")
+    async def build_cmd(self, ctx: commands.Context):
+        ok, msg = _coreops_guard(ctx)
+        if not ok:
+            return await ctx.send(msg)
+
+        def _hash_for(path: pathlib.Path) -> str:
+            try:
+                with path.open("rb") as handle:
+                    return hashlib.md5(handle.read()).hexdigest()[:10]
+            except Exception:
+                return "missing"
+
+        def _describe(label: str, path: pathlib.Path) -> str:
+            if not path.exists():
+                return f"- {label}: missing"
+            digest = _hash_for(path)
+            try:
+                mtime = time.ctime(path.stat().st_mtime)
+            except Exception:
+                mtime = "?"
+            return f"- {label}: `{digest}` @ {mtime}"
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        lr_path = root / "modules" / "achievements" / "locators" / "left_rail.py"
+        ocr_pipeline_path = root / "modules" / "achievements" / "ocr_pipeline.py"
+        icons_dir = root / "modules" / "achievements" / "assets" / "ocr" / "icons"
+        git_sha = os.getenv("GIT_SHA", "unknown")
+
+        lines = [
+            "**Build**",
+            f"- Python: {platform.python_version()}",
+            f"- GIT_SHA: `{git_sha}`",
+            _describe("left_rail.py", lr_path),
+            _describe("ocr_pipeline.py", ocr_pipeline_path),
+            f"- icons dir: `{icons_dir}` exists={icons_dir.exists()}",
+        ]
+
+        try:
+            lr_mod = importlib.import_module("modules.achievements.locators.left_rail")
+            has_corner = hasattr(lr_mod, "match_corners") and hasattr(lr_mod, "corners_to_number_rois")
+            if has_corner:
+                try:
+                    src_line = inspect.getsourcelines(lr_mod.match_corners)[1]
+                except Exception:
+                    src_line = "?"
+            else:
+                src_line = "-"
+            lines.append(f"- corner-match present: **{has_corner}** (def line {src_line})")
+        except Exception as exc:
+            lines.append(f"- import left_rail failed: {exc.__class__.__name__}: {exc}")
+
+        await ctx.reply("\n".join(lines), mention_author=False)
 
     @commands.command(name="reboot", aliases=["restart", "rb"])
     async def reboot_cmd(self, ctx: commands.Context):
