@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
@@ -9,6 +10,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 import pytesseract
+
+log = logging.getLogger("c1c-claims")
 
 from .locators.left_rail import (
     corners_to_number_rois,
@@ -70,6 +73,22 @@ def _prep_bin(img_np: np.ndarray) -> np.ndarray:
         31,
         9,
     )
+
+
+def _lenient_digits(bin_or_gray: np.ndarray) -> str:
+    """Run a relaxed OCR pass to rescue digits filtered out by confidence checks."""
+
+    if bin_or_gray is None or bin_or_gray.size == 0:
+        return ""
+
+    config = "--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789,"
+    try:
+        raw = pytesseract.image_to_string(bin_or_gray, lang="eng", config=config) or ""
+    except Exception:
+        return ""
+
+    raw = raw.replace(",", "")
+    return re.sub(r"\D+", "", raw)
 
 
 @dataclass(slots=True)
@@ -251,6 +270,9 @@ def _read_int(name: str, roi_np: np.ndarray) -> Tuple[int, float, str]:
 
     texts: List[str] = []
     confs: List[float] = []
+    all_texts: List[str] = []
+    all_confs: List[float] = []
+
     for text, conf in zip(data.get("text", []), data.get("conf", [])):
         if not text:
             continue
@@ -261,16 +283,55 @@ def _read_int(name: str, roi_np: np.ndarray) -> Tuple[int, float, str]:
             score = float(conf)
         except Exception:
             score = -1.0
+
+        all_texts.append(cleaned)
+        all_confs.append(score)
+
         if score < CONF_FLOOR:
             continue
+
         texts.append(cleaned)
         confs.append(score)
 
-    raw = "".join(texts)
-    raw = raw.replace(" ", "").replace(",", "")
-    value = int(raw) if raw.isdigit() else 0
-    mean_conf = float(np.mean(confs)) if confs else 0.0
-    return value, mean_conf, raw
+    strict_raw = "".join(texts)
+    strict_raw = strict_raw.replace(" ", "").replace(",", "")
+
+    kept = len(texts)
+    total = len(all_texts)
+
+    cand_a = strict_raw
+    conf_a = float(np.mean(confs)) if confs else 0.0
+
+    cand_b = ""
+    conf_b = 0.0
+
+    if total > 0 and kept < total:
+        cand_b = _lenient_digits(binimg)
+        conf_b = float(np.mean([c for c in all_confs if c >= 0])) if all_confs else 0.0
+        log.info(
+            "[ocr] %s: lenient fallback considered (kept=%d/%d, strict='%s', loose='%s')",
+            name,
+            kept,
+            total,
+            cand_a,
+            cand_b,
+        )
+
+    def _score(raw: str, confidence: float) -> Tuple[int, float]:
+        return len(raw or ""), confidence
+
+    best_raw = cand_a
+    best_conf = conf_a
+
+    if cand_b and _score(cand_b, conf_b) > _score(cand_a, conf_a):
+        best_raw = cand_b
+        best_conf = conf_b
+        log.info(
+            "[ocr] %s: using lenient result '%s' over strict '%s'", name, best_raw, cand_a
+        )
+
+    value = int(best_raw) if best_raw.isdigit() else 0
+    return value, best_conf, best_raw
 
 
 def _read_band(name: str, roi: np.ndarray) -> Tuple[int, float, str, Dict[str, Any]]:
