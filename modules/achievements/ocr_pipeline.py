@@ -10,7 +10,13 @@ import cv2
 import numpy as np
 import pytesseract
 
-from .locators.left_rail import load_templates, match_icons, tiles_to_number_rois
+from .locators.left_rail import (
+    corners_to_number_rois,
+    load_templates,
+    match_corners,
+    match_icons,
+    tiles_to_number_rois,
+)
 
 __all__ = [
     "DEFAULT_CONFIG",
@@ -170,8 +176,13 @@ def _template_rois_with_boxes(full_img: np.ndarray) -> List[Tuple[str, np.ndarra
     if _TEMPLATE_CACHE is None:
         _TEMPLATE_CACHE = load_templates()
 
-    hits = match_icons(full_img, _TEMPLATE_CACHE or {})
-    return tiles_to_number_rois(full_img, hits)
+    templates = _TEMPLATE_CACHE or {}
+    icon_hits = match_icons(full_img, templates)
+    rois = tiles_to_number_rois(full_img, icon_hits) if icon_hits else []
+    if not rois:
+        corner_hits = match_corners(full_img, templates)
+        rois = corners_to_number_rois(full_img, corner_hits) if corner_hits else []
+    return rois
 
 
 def find_counter_rois_with_boxes(full_img: np.ndarray) -> List[Tuple[str, np.ndarray, Tuple[int, int, int, int]]]:

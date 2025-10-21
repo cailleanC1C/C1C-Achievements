@@ -6,7 +6,13 @@ from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 
-from ..locators.left_rail import load_templates, match_icons, tiles_to_number_rois
+from ..locators.left_rail import (
+    corners_to_number_rois,
+    load_templates,
+    match_corners,
+    match_icons,
+    tiles_to_number_rois,
+)
 from ..ocr_pipeline import collect_debug_fields, find_counter_rois_with_boxes
 
 
@@ -28,7 +34,10 @@ def build_left_rail_overlay(full_img: np.ndarray) -> Optional[bytes]:
     else:
         templates = load_templates()
         hits = match_icons(full_img, templates)
-        overlays = tiles_to_number_rois(full_img, hits)
+        overlays = tiles_to_number_rois(full_img, hits) if hits else []
+        if not overlays:
+            corner_hits = match_corners(full_img, templates)
+            overlays = corners_to_number_rois(full_img, corner_hits) if corner_hits else []
 
     if not overlays:
         return None
