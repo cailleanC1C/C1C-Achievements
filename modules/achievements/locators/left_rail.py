@@ -36,6 +36,9 @@ NUMBER_ROI: Dict[str, Tuple[int, int, int, int]] = {
     "Sacred": (6, 74, 28, 20),
 }
 
+# Small global Y offset to sit the ROI directly on the digits
+ROI_Y_OFFSET_PCT = 2
+
 
 def _asset_path(fname: str) -> str:
     here = os.path.dirname(__file__)
@@ -168,6 +171,7 @@ def tiles_to_number_rois(
         tile_y2 = min(height, tile_y + tile_h)
 
         rx, ry, rw, rh = NUMBER_ROI.get(hit.name, (6, 74, 30, 20))
+        ry += ROI_Y_OFFSET_PCT
         number_x = tile_x + int((rx / 100) * (tile_x2 - tile_x))
         number_y = tile_y + int((ry / 100) * (tile_y2 - tile_y))
         number_w = int((rw / 100) * (tile_x2 - tile_x))
@@ -197,6 +201,7 @@ def corners_to_number_rois(
         tile_y2 = min(height, tile_y + tile_h)
 
         rx, ry, rw, rh = NUMBER_ROI.get(hit.name, (6, 74, 30, 20))
+        ry += ROI_Y_OFFSET_PCT
         number_x = tile_x + int((rx / 100) * (tile_x2 - tile_x))
         number_y = tile_y + int((ry / 100) * (tile_y2 - tile_y))
         number_w = int((rw / 100) * (tile_x2 - tile_x))
