@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 import discord
 from discord.ext import commands, tasks
 from flask import Flask, jsonify, request
-from aiohttp import ClientConnectorError
+from aiohttp import ClientConnectorError, ClientSession, ClientTimeout
 
 from core.prefix import get_prefix
 
@@ -35,6 +35,7 @@ logging.basicConfig(level=logging.INFO)
 # ---------------- runtime telemetry ----------------
 START_TIME = datetime.datetime.utcnow()
 BOT_CONNECTED = False
+_KEEPALIVE_TASK: asyncio.Task | None = None
 
 
 def _env_truthy(name: str, default: bool = False) -> bool:
@@ -59,6 +60,16 @@ WATCHDOG_DISCONNECT_AGE_SEC = _int_env(
     _int_env("WATCHDOG_MAX_DISCONNECT_SEC", 600),
 )
 WATCHDOG_LATENCY_SEC = float(os.getenv("WATCHDOG_LATENCY_SEC", "10"))
+
+# ---------------- keep-alive ping config (Render) ----------------
+# Optional: outbound ping to keep the web service warm, same pattern as Matchmaker/WelcomeCrew.
+# Example:
+#   KEEPALIVE_PING_URL=https://c1c-achievements-1.onrender.com
+#   KEEPALIVE_INTERVAL_SEC=300
+#   KEEPALIVE_TIMEOUT_SEC=10
+KEEPALIVE_PING_URL = os.getenv("KEEPALIVE_PING_URL", "").strip()
+KEEPALIVE_INTERVAL_SEC = _int_env("KEEPALIVE_INTERVAL_SEC", 300)
+KEEPALIVE_TIMEOUT_SEC = _int_env("KEEPALIVE_TIMEOUT_SEC", 10)
 
 
 class _Heartbeat:
@@ -134,6 +145,32 @@ def _get_latency_s() -> float | None:
         return float(latency) if latency is not None else None
     except Exception:
         return None
+
+
+async def _keepalive_ping_loop() -> None:
+    """
+    Periodically ping KEEPALIVE_PING_URL so Render sees HTTP activity.
+    Mirrors the Matchmaker / WelcomeCrew keepalive behaviour.
+    """
+    if not KEEPALIVE_PING_URL:
+        return
+
+    timeout = ClientTimeout(total=KEEPALIVE_TIMEOUT_SEC)
+
+    # Single long-lived session; loop runs for process lifetime.
+    async with ClientSession(timeout=timeout) as session:
+        while True:
+            try:
+                async with session.get(KEEPALIVE_PING_URL) as resp:
+                    # Use stdout to keep it consistent with the other bots' keepalive logs.
+                    print(
+                        f"[keepalive] ping {KEEPALIVE_PING_URL} -> {resp.status}",
+                        flush=True,
+                    )
+            except Exception as e:
+                print(f"[keepalive] ping failed: {type(e).__name__}: {e}", flush=True)
+
+            await asyncio.sleep(max(1, KEEPALIVE_INTERVAL_SEC))
 
 
 def _health_payload() -> tuple[dict, int]:
@@ -1699,7 +1736,7 @@ async def on_disconnect():
 
 @bot.event
 async def on_ready():
-    global BOT_CONNECTED
+    global BOT_CONNECTED, _KEEPALIVE_TASK
     BOT_CONNECTED = True
     _hb.note_ready()
     _touch_event()
@@ -1727,11 +1764,20 @@ async def on_ready():
     except Exception:
         pass
 
+    # Start watchdog if not already running.
     try:
         if not _watchdog.is_running():
             _watchdog.start()
     except Exception:
         log.exception("[watchdog] failed to start")
+
+    # Start keepalive ping loop once per process (avoid duplicates on reconnects).
+    if KEEPALIVE_PING_URL and (_KEEPALIVE_TASK is None or _KEEPALIVE_TASK.done()):
+        try:
+            _KEEPALIVE_TASK = asyncio.create_task(_keepalive_ping_loop())
+            log.info("[keepalive] loop started (url=%s, interval=%ss)", KEEPALIVE_PING_URL, KEEPALIVE_INTERVAL_SEC)
+        except Exception:
+            log.exception("[keepalive] failed to start loop")
 
 
 async def _run_bot(token: str) -> None:
