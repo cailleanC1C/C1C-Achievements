@@ -8,24 +8,13 @@ from functools import partial
 from urllib.parse import urlparse
 
 import discord
-from discord.ext import commands
-from flask import Flask
+from discord.ext import commands, tasks
+from flask import Flask, jsonify, request
 from aiohttp import ClientConnectorError
 
 from core.prefix import get_prefix
 
 BOT_VERSION = "1.0.1"
-
-# ---------------- keep-alive (Render web service) ----------------
-app = Flask(__name__)
-
-@app.route("/")
-def health():
-    return "ok", 200
-
-def keep_alive():
-    port = int(os.getenv("PORT", "10000"))
-    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=port), daemon=True).start()
 
 # ---------------- optional libs for config sources ----------------
 try:
@@ -45,7 +34,6 @@ logging.basicConfig(level=logging.INFO)
 
 # ---------------- runtime telemetry ----------------
 START_TIME = datetime.datetime.utcnow()
-_LAST_EVENT_TS = START_TIME
 BOT_CONNECTED = False
 
 
@@ -65,19 +53,64 @@ def _int_env(name: str, default: int) -> int:
 
 STRICT_PROBE = _env_truthy("STRICT_PROBE", default=False)
 WATCHDOG_CHECK_SEC = _int_env("WATCHDOG_CHECK_SEC", 60)
-WATCHDOG_MAX_DISCONNECT_SEC = _int_env("WATCHDOG_MAX_DISCONNECT_SEC", 600)
+WATCHDOG_ZOMBIE_SEC = _int_env("WATCHDOG_ZOMBIE_SEC", 600)
+WATCHDOG_DISCONNECT_AGE_SEC = _int_env(
+    "WATCHDOG_DISCONNECT_AGE_SEC",
+    _int_env("WATCHDOG_MAX_DISCONNECT_SEC", 600),
+)
+WATCHDOG_LATENCY_SEC = float(os.getenv("WATCHDOG_LATENCY_SEC", "10"))
+
+
+class _Heartbeat:
+    def __init__(self) -> None:
+        self.connected: bool = False
+        self.last_event_ts: datetime.datetime | None = None
+        self.last_connect_ts: datetime.datetime | None = None
+        self.last_disconnect_ts: datetime.datetime | None = None
+
+    def note_event(self) -> None:
+        ts = datetime.datetime.utcnow()
+        self.last_event_ts = ts
+        if not self.connected:
+            self.connected = True
+            self.last_connect_ts = ts
+
+    def note_connected(self) -> None:
+        ts = datetime.datetime.utcnow()
+        self.connected = True
+        self.last_connect_ts = ts
+
+    def note_ready(self) -> None:
+        self.note_connected()
+        self.note_event()
+
+    def note_disconnected(self) -> None:
+        self.connected = False
+        self.last_disconnect_ts = datetime.datetime.utcnow()
+
+    def last_event_age_s(self) -> int | None:
+        if not self.last_event_ts:
+            return None
+        return int((datetime.datetime.utcnow() - self.last_event_ts).total_seconds())
+
+    def disconnected_age_s(self) -> int | None:
+        if self.connected:
+            return None
+        if not self.last_disconnect_ts:
+            return None
+        return int((datetime.datetime.utcnow() - self.last_disconnect_ts).total_seconds())
+
+
+_hb = _Heartbeat()
 
 
 def _touch_event() -> None:
-    global _LAST_EVENT_TS
-    _LAST_EVENT_TS = datetime.datetime.utcnow()
+    _hb.note_event()
 
 
 def _last_event_age_s() -> int:
-    try:
-        return max(0, int((datetime.datetime.utcnow() - _LAST_EVENT_TS).total_seconds()))
-    except Exception:
-        return 0
+    age = _hb.last_event_age_s()
+    return age if age is not None else 0
 
 
 def uptime_str() -> str:
@@ -93,6 +126,84 @@ def uptime_str() -> str:
     parts.append(f"{minutes:02}m")
     parts.append(f"{seconds:02}s")
     return " ".join(parts)
+
+
+def _get_latency_s() -> float | None:
+    try:
+        latency = getattr(bot, "latency", None)
+        return float(latency) if latency is not None else None
+    except Exception:
+        return None
+
+
+def _health_payload() -> tuple[dict, int]:
+    connected = _hb.connected
+    age = _hb.last_event_age_s()
+    latency = _get_latency_s()
+
+    status = 503 if not connected else 200
+    if connected and (
+        (age is not None and age > WATCHDOG_ZOMBIE_SEC)
+        or (latency is not None and latency > WATCHDOG_LATENCY_SEC)
+    ):
+        status = 206
+
+    body = {
+        "ok": status == 200,
+        "connected": connected,
+        "uptime": uptime_str(),
+        "last_event_age_s": age,
+        "latency_s": latency,
+        "disconnected_age_s": _hb.disconnected_age_s(),
+        "strict_probe": STRICT_PROBE,
+    }
+    return body, status
+
+
+async def _maybe_restart(reason: str) -> None:
+    log.error("[WATCHDOG] Restarting: %s", reason)
+    try:
+        await bot.close()
+    except Exception:
+        pass
+    raise SystemExit(1)
+
+
+@tasks.loop(seconds=WATCHDOG_CHECK_SEC)
+async def _watchdog() -> None:
+    # If connected, check for zombie state (no events for a long while + bad latency).
+    if _hb.connected:
+        idle_for = _hb.last_event_age_s()
+        latency = _get_latency_s()
+
+        if idle_for is not None and idle_for > WATCHDOG_ZOMBIE_SEC and (latency is None or latency > WATCHDOG_LATENCY_SEC):
+            await _maybe_restart(f"zombie: no events for {idle_for}s, latency={latency}")
+        return
+
+    # If disconnected, only restart after a long downtime.
+    down_for = _hb.disconnected_age_s()
+    if down_for is not None and down_for > WATCHDOG_DISCONNECT_AGE_SEC:
+        await _maybe_restart(f"disconnected too long: {down_for}s")
+
+
+# ---------------- keep-alive (Render web service) ----------------
+app = Flask(__name__)
+
+
+@app.route("/")
+@app.route("/ready")
+@app.route("/health")
+@app.route("/healthz")
+def health():
+    body, status = _health_payload()
+    if not STRICT_PROBE and request.path != "/healthz":
+        status = 200
+    return jsonify(body), status
+
+
+def keep_alive():
+    port = int(os.getenv("PORT", "10000"))
+    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=port), daemon=True).start()
     
 # ---------------- discord client ----------------
 intents = discord.Intents.default()
@@ -1553,10 +1664,17 @@ async def _auto_refresh_loop(minutes: int):
         except Exception:
             log.exception("Auto-refresh failed; keeping previous config")
 
+
+@bot.event
+async def on_socket_response(_payload):
+    _touch_event()
+
+
 @bot.event
 async def on_connect():
     global BOT_CONNECTED
     BOT_CONNECTED = True
+    _hb.note_connected()
     _touch_event()
     log.info("[gateway] connected")
 
@@ -1565,6 +1683,7 @@ async def on_connect():
 async def on_resumed():
     global BOT_CONNECTED
     BOT_CONNECTED = True
+    _hb.note_connected()
     _touch_event()
     log.info("[gateway] resumed session")
 
@@ -1573,6 +1692,7 @@ async def on_resumed():
 async def on_disconnect():
     global BOT_CONNECTED
     BOT_CONNECTED = False
+    _hb.note_disconnected()
     _touch_event()
     log.warning("[gateway] disconnected")
 
@@ -1581,6 +1701,7 @@ async def on_disconnect():
 async def on_ready():
     global BOT_CONNECTED
     BOT_CONNECTED = True
+    _hb.note_ready()
     _touch_event()
     log.info(f"Logged in as {bot.user} ({bot.user.id})")
     global _INITIAL_CONFIG_TASK
@@ -1605,6 +1726,12 @@ async def on_ready():
         log.info(f"Registered slash commands:  {slash_cmds}")
     except Exception:
         pass
+
+    try:
+        if not _watchdog.is_running():
+            _watchdog.start()
+    except Exception:
+        log.exception("[watchdog] failed to start")
 
 
 async def _run_bot(token: str) -> None:
