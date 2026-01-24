@@ -199,10 +199,6 @@ def _health_payload() -> tuple[dict, int]:
 
 async def _maybe_restart(reason: str) -> None:
     log.error("[WATCHDOG] Restarting: %s", reason)
-    try:
-        await bot.close()
-    except Exception:
-        pass
     raise SystemExit(1)
 
 
@@ -240,7 +236,15 @@ def health():
 
 def keep_alive():
     port = int(os.getenv("PORT", "10000"))
-    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=port), daemon=True).start()
+    threading.Thread(
+        target=lambda: app.run(
+            host="0.0.0.0",
+            port=port,
+            debug=False,
+            use_reloader=False,
+        ),
+        daemon=True,
+    ).start()
     
 # ---------------- discord client ----------------
 intents = discord.Intents.default()
@@ -1781,49 +1785,22 @@ async def on_ready():
 
 
 async def _run_bot(token: str) -> None:
-    base_delay = 5
-    attempt = 0
-
-    while True:
-        try:
-            await bot.login(token)
-            attempt = 0
-            await bot.connect(reconnect=True)
-            log.info("Bot connection closed gracefully; exiting run loop")
-            break
-        except discord.LoginFailure as e:
-            log.error("Login failed: %s", e)
-            raise
-        except ClientConnectorError as e:
-            attempt += 1
-            wait = min(600, base_delay * (2 ** (attempt - 1)))
-            log.warning("[startup] Network connect error: %s — retrying in %ss", e, wait)
-            await asyncio.sleep(wait)
-        except discord.HTTPException as e:
-            attempt += 1
-            wait = min(600, base_delay * (2 ** (attempt - 1)))
-            status = getattr(e, "status", None)
-            message = str(e)
-            if status in {429, 503} or "rate limited" in message.lower() or "banned" in message.lower():
-                log.warning(
-                    "[startup] Discord refused the connection (status=%s). Cooling down for %ss before retry.",
-                    status,
-                    wait,
-                )
-            else:
-                log.exception("[startup] discord.HTTPException (status=%s)", status)
-            await asyncio.sleep(wait)
-        except Exception as e:
-            attempt += 1
-            wait = min(600, base_delay * (2 ** (attempt - 1)))
-            log.exception("[startup] Unexpected exception: %s — retrying in %ss", e, wait)
-            await asyncio.sleep(wait)
-        finally:
-            if not bot.is_closed():
-                try:
-                    await bot.close()
-                except Exception:
-                    pass
+    try:
+        # start() handles login + connect and manages its own HTTP session lifecycle.
+        await bot.start(token, reconnect=True)
+    except discord.LoginFailure as e:
+        log.error("Login failed: %s", e)
+        raise
+    except Exception as e:
+        # If anything fatal happens, exit so Render can restart the service cleanly.
+        log.exception("[startup] Fatal exception; exiting so platform can restart: %s", e)
+        raise
+    finally:
+        if not bot.is_closed():
+            try:
+                await bot.close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
