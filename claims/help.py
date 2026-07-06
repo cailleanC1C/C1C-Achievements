@@ -2,6 +2,7 @@
 
 import os
 import discord
+from achievements.help_metadata import help_metadata, tier
 from datetime import datetime
 
 try:
@@ -132,6 +133,8 @@ async def setup(bot):
 
     import os
 
+    @help_metadata(function_group="claims", section="claims", access_tier="user", usage="!help [topic]", flags=("local_help", "transitional"))
+    @tier("user")
     @bot.command(name="help")
     async def help_cmd(ctx, *, topic: str | None = None):
         ver = os.getenv("BOT_VERSION", "dev")
