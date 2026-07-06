@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 import discord
 from discord.ext import commands, tasks
+from achievements.help_metadata import help_metadata, tier
 from flask import Flask, jsonify, request
 from aiohttp import ClientConnectorError, ClientSession, ClientTimeout
 
@@ -1364,6 +1365,8 @@ def _is_staff(member: discord.Member) -> bool:
     return bool(rid and any(r.id == rid for r in member.roles))
 
 # ---------------- help ----------------
+@help_metadata(function_group="claims", section="claims", access_tier="user", usage="!help [topic]", flags=("local_help", "transitional"))
+@tier("user")
 @bot.command(name="help")
 async def help_cmd(ctx: commands.Context, *, topic: str = None):
     topic = (topic or "").strip().lower()
@@ -1397,6 +1400,8 @@ async def help_cmd(ctx: commands.Context, *, topic: str = None):
     await ctx.reply(embed=e, mention_author=False)
 
 # ---------------- admin/test commands ----------------
+@help_metadata(function_group="operational", section="admin_maintenance", access_tier="staff", usage="!testconfig", flags=("diagnostic",))
+@tier("staff")
 @bot.command(name="testconfig")
 async def testconfig(cmdx: commands.Context):
     if not _is_staff(cmdx.author):
@@ -1425,6 +1430,8 @@ async def testconfig(cmdx: commands.Context):
     )
     await safe_send_embed(cmdx, emb)
 
+@help_metadata(function_group="operational", section="admin_maintenance", access_tier="staff", usage="!configstatus", flags=("diagnostic",))
+@tier("staff")
 @bot.command(name="configstatus")
 async def configstatus(ctx: commands.Context):
     if not _is_staff(ctx.author):
@@ -1432,6 +1439,8 @@ async def configstatus(ctx: commands.Context):
     loaded_at = CONFIG_META["loaded_at"].strftime("%Y-%m-%d %H:%M:%S UTC") if CONFIG_META["loaded_at"] else "—"
     await ctx.send(f"Source: **{CONFIG_META['source']}** | Loaded: **{loaded_at}** | Ach={len(ACHIEVEMENTS)} Cat={len(CATEGORIES)} Lvls={len(LEVELS)}")
 
+@help_metadata(function_group="operational", section="admin_maintenance", access_tier="staff", usage="!reloadconfig")
+@tier("staff")
 @bot.command(name="reloadconfig")
 async def reloadconfig(ctx: commands.Context):
     if not _is_staff(ctx.author):
@@ -1443,6 +1452,8 @@ async def reloadconfig(ctx: commands.Context):
     except Exception as e:
         await ctx.send(f"Reload failed: `{e}`")
 
+@help_metadata(function_group="achievements", section="admin_maintenance", access_tier="staff", usage="!listach [filter]")
+@tier("staff")
 @bot.command(name="listach")
 async def listach(ctx: commands.Context, filter_text: str = ""):
     if not _is_staff(ctx.author):
@@ -1456,6 +1467,8 @@ async def listach(ctx: commands.Context, filter_text: str = ""):
     chunk = ", ".join(keys[:60])
     await ctx.send(f"**Loaded achievements ({len(keys)}):** {chunk}{' …' if len(keys) > 60 else ''}")
 
+@help_metadata(function_group="achievements", section="admin_maintenance", access_tier="staff", usage="!findach <text>")
+@tier("staff")
 @bot.command(name="findach")
 async def findach(ctx: commands.Context, *, text: str):
     if not _is_staff(ctx.author):
@@ -1470,6 +1483,8 @@ async def findach(ctx: commands.Context, *, text: str):
         return await ctx.send("No matches.")
     await ctx.send("\n".join(hits[:20]))
 
+@help_metadata(function_group="achievements", section="testing", access_tier="staff", usage="!testach <key> [where]", flags=("test",))
+@tier("staff")
 @bot.command(name="testach")
 async def testach(ctx: commands.Context, key: str, where: Optional[str] = None):
     if not _is_staff(ctx.author):
@@ -1486,6 +1501,8 @@ async def testach(ctx: commands.Context, key: str, where: Optional[str] = None):
     if target.id != ctx.channel.id:
         await ctx.reply(f"Preview sent to {target.mention}", mention_author=False)
 
+@help_metadata(function_group="achievements", section="testing", access_tier="staff", usage="!testlevel [query] [where]", flags=("test",))
+@tier("staff")
 @bot.command(name="testlevel")
 async def testlevel(ctx: commands.Context, *, args: str = ""):
     if not _is_staff(ctx.author):
@@ -1509,6 +1526,8 @@ async def testlevel(ctx: commands.Context, *, args: str = ""):
     if target.id != ctx.channel.id:
         await ctx.reply(f"Preview sent to {target.mention}", mention_author=False)
 
+@help_metadata(function_group="claims", section="admin_maintenance", access_tier="staff", usage="!flushpraise")
+@tier("staff")
 @bot.command(name="flushpraise")
 async def flushpraise(ctx: commands.Context):
     if not _is_staff(ctx.author):
@@ -1520,6 +1539,8 @@ async def flushpraise(ctx: commands.Context):
         await _flush_group(ctx.guild, uid)
     await ctx.send("Flushed pending praise for this server.")
 
+@help_metadata(function_group="operational", section="members", access_tier="user", usage="!ping")
+@tier("user")
 @bot.command(name="ping")
 async def ping(ctx: commands.Context):
     # react-only liveness check

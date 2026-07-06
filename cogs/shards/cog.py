@@ -14,6 +14,7 @@ import cv2
 import discord
 import numpy as np
 from discord.ext import commands
+from achievements.help_metadata import help_metadata, tier
 
 from .constants import ShardType, Rarity, DISPLAY_ORDER
 from . import sheets_adapter as SA
@@ -436,6 +437,8 @@ class ShardsCog(commands.Cog):
         asyncio.create_task(_drop())
 
     # ---------- OCR DIAGNOSTICS ----------
+    @help_metadata(function_group="diagnostics", section="diagnostics", access_tier="hidden", usage="!ocrdebug", flags=("diagnostic", "hidden"))
+    @tier("hidden")
     @commands.command(name="ocrdebug")
     @commands.guild_only()
     async def ocr_debug_cmd(self, ctx: commands.Context):
@@ -555,6 +558,8 @@ class ShardsCog(commands.Cog):
 
         await ctx.reply(embed=embed, files=_with_overlay(), mention_author=False)
 
+    @help_metadata(function_group="diagnostics", section="diagnostics", access_tier="hidden", usage="!ocrdiag", flags=("diagnostic", "hidden"))
+    @tier("hidden")
     @commands.command(name="ocrdiag")
     @commands.guild_only()
     async def ocr_diag_cmd(self, ctx: commands.Context):
@@ -621,6 +626,8 @@ class ShardsCog(commands.Cog):
 
         await ctx.reply("\n".join(lines), mention_author=False)
 
+    @help_metadata(function_group="diagnostics", section="diagnostics", access_tier="staff", usage="!ocr <info|selftest>", flags=("diagnostic",))
+    @tier("staff")
     @commands.command(name="ocr")
     async def ocr_cmd(self, ctx: commands.Context, sub: Optional[str] = None):
         """
@@ -661,6 +668,8 @@ class ShardsCog(commands.Cog):
         await ctx.reply("Usage: `!ocr info` or `!ocr selftest`.", mention_author=False)
 
     # ---------- COMMANDS ----------
+    @help_metadata(function_group="leaderboard", section="progress", access_tier="user", usage="!shards [help|set]")
+    @tier("user")
     @commands.command(name="shards")
     async def shards_cmd(self, ctx: commands.Context, sub: Optional[str] = None, *, tail: Optional[str] = None):
         if not isinstance(ctx.channel, discord.Thread) or not self._is_shard_thread(ctx.channel):
@@ -729,6 +738,8 @@ class ShardsCog(commands.Cog):
         view.add_item(btn)
         await ctx.reply("Click to open the form:", view=view)
 
+    @help_metadata(function_group="leaderboard", section="progress", access_tier="user", usage="!mercy addpulls")
+    @tier("user")
     @commands.command(name="mercy")
     async def mercy_cmd(self, ctx: commands.Context, sub: Optional[str] = None, *, tail: Optional[str] = None):
         if not isinstance(ctx.channel, discord.Thread) or not self._is_shard_thread(ctx.channel):

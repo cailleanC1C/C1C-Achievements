@@ -5,6 +5,7 @@ import os, json, pathlib, hashlib, time, platform
 import importlib, inspect
 import discord
 from discord.ext import commands
+from achievements.help_metadata import help_metadata, tier
 import logging
 
 from core.prefix import SCOPED_PREFIXES, get_prefix
@@ -56,6 +57,8 @@ class OpsCog(commands.Cog):
             pass
 
     # ---------------- core ops commands (staff-only; non-staff get prefix picker) ----------------
+    @help_metadata(function_group="operational", section="admin_maintenance", access_tier="staff", usage="!health", flags=('diagnostic',))
+    @tier("staff")
     @commands.command(name="health")
     async def health_cmd(self, ctx: commands.Context):
         ok, msg = _coreops_guard(ctx)
@@ -107,6 +110,8 @@ class OpsCog(commands.Cog):
         emb = build_health_embed(app.BOT_VERSION, summary)
         await app.safe_send_embed(ctx, emb)
 
+    @help_metadata(function_group="operational", section="admin_maintenance", access_tier="staff", usage="!digest", flags=('diagnostic',))
+    @tier("staff")
     @commands.command(name="digest")
     async def digest_cmd(self, ctx: commands.Context):
         ok, msg = _coreops_guard(ctx)
@@ -162,6 +167,8 @@ class OpsCog(commands.Cog):
         line = build_digest_line(summary)
         await ctx.send(line)
 
+    @help_metadata(function_group="operational", section="admin_maintenance", access_tier="staff", usage="!reload")
+    @tier("staff")
     @commands.command(name="reload")
     async def reload_cmd(self, ctx: commands.Context):
         ok, msg = _coreops_guard(ctx)
@@ -186,6 +193,8 @@ class OpsCog(commands.Cog):
         except Exception as e:
             await ctx.send(f"Reload failed: `{e}`")
 
+    @help_metadata(function_group="operational", section="admin_maintenance", access_tier="staff", usage="!checksheet", flags=('diagnostic',))
+    @tier("staff")
     @commands.command(name="checksheet")
     async def checksheet_cmd(self, ctx: commands.Context):
         ok, msg = _coreops_guard(ctx)
@@ -236,6 +245,8 @@ class OpsCog(commands.Cog):
         emb = build_checksheet_embed(app.BOT_VERSION, backend, items)
         await app.safe_send_embed(ctx, emb)
 
+    @help_metadata(function_group="operational", section="admin_maintenance", access_tier="staff", usage="!env", flags=('diagnostic',))
+    @tier("staff")
     @commands.command(name="env")
     async def env_cmd(self, ctx: commands.Context):
         ok, msg = _coreops_guard(ctx)
@@ -255,6 +266,8 @@ class OpsCog(commands.Cog):
         emb = build_env_embed(app.BOT_VERSION, env_info)
         await app.safe_send_embed(ctx, emb)
 
+    @help_metadata(function_group="operational", section="admin_maintenance", access_tier="staff", usage="!build", flags=('diagnostic', 'hidden'))
+    @tier("staff")
     @commands.command(name="build")
     async def build_cmd(self, ctx: commands.Context):
         ok, msg = _coreops_guard(ctx)
@@ -309,6 +322,8 @@ class OpsCog(commands.Cog):
 
         await ctx.reply("\n".join(lines), mention_author=False)
 
+    @help_metadata(function_group="operational", section="admin_maintenance", access_tier="staff", usage="!reboot")
+    @tier("staff")
     @commands.command(name="reboot", aliases=["restart", "rb"])
     async def reboot_cmd(self, ctx: commands.Context):
         ok, msg = _coreops_guard(ctx)
