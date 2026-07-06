@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 import discord
 from discord.ext import commands, tasks
 from achievements.help_metadata import help_metadata, tier
+from achievements.help_seed import HelpSeedError, _is_rate_limit, format_seed_reply, open_help_worksheet, seed_help_commands
 from flask import Flask, jsonify, request
 from aiohttp import ClientConnectorError, ClientSession, ClientTimeout
 
@@ -1400,6 +1401,27 @@ async def help_cmd(ctx: commands.Context, *, topic: str = None):
     await ctx.reply(embed=e, mention_author=False)
 
 # ---------------- admin/test commands ----------------
+
+@help_metadata(function_group="diagnostics", section="admin_maintenance", access_tier="hidden", usage="!helpseed", flags=("hidden", "maintenance"))
+@tier("hidden")
+@bot.command(name="helpseed")
+async def helpseed(ctx: commands.Context):
+    if not _is_staff(ctx.author):
+        return await ctx.send("Staff only.")
+    try:
+        worksheet = await asyncio.to_thread(open_help_worksheet)
+        result = await asyncio.to_thread(seed_help_commands, bot, worksheet)
+    except Exception as e:
+        if _is_rate_limit(e):
+            log.warning("[helpseed] Google Sheets rate limit", exc_info=True)
+            return await ctx.send("⚠️ Help registry seed hit Google Sheets rate limits. Wait a minute and try again.")
+        if isinstance(e, HelpSeedError):
+            log.warning("[helpseed] failed: %s", e, exc_info=True)
+            return await ctx.send(f"Help registry seed failed: {e}")
+        log.exception("[helpseed] unexpected failure")
+        return await ctx.send("Help registry seed failed. Check logs for details.")
+    await ctx.send(format_seed_reply(result))
+
 @help_metadata(function_group="operational", section="admin_maintenance", access_tier="staff", usage="!testconfig", flags=("diagnostic",))
 @tier("staff")
 @bot.command(name="testconfig")

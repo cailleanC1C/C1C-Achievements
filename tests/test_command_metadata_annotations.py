@@ -26,7 +26,7 @@ def test_monolith_registered_commands_have_metadata_and_help_remains():
         "findach", "testach", "testlevel", "flushpraise", "ping",
     }
     assert expected.issubset(names)
-    assert "helpseed" not in names
+    assert "helpseed" in names
 
     for command in app.bot.commands:
         if command.name in expected:
@@ -37,6 +37,8 @@ def test_monolith_registered_commands_have_metadata_and_help_remains():
     assert app.bot.get_command("ping").extras["function_group"] == "operational"
     assert app.bot.get_command("ping").extras["help_section"] == "members"
     assert app.bot.get_command("help").extras["help_flags"] == ("local_help", "transitional")
+    assert_metadata(app.bot.get_command("helpseed"), "hidden")
+    assert app.bot.get_command("helpseed").extras["help_flags"] == ("hidden", "maintenance")
 
 
 def test_admin_staff_monolith_commands_keep_runtime_staff_checks():
@@ -80,4 +82,4 @@ def test_help_only_topics_do_not_create_fake_commands():
     assert "claim" not in runnable
     assert "claims" not in runnable
     assert "gk" not in runnable
-    assert "helpseed" not in runnable
+    assert "helpseed" in runnable
