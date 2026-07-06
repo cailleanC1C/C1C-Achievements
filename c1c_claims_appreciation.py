@@ -508,16 +508,14 @@ async def setup_hook():
             log.warning(f"[cogs] failed {name}: {e}")
             return False
 
-    # Load the NEW help (not the old middleware one)
-    await _load("claims.help")
+    # Achievements no longer registers a local !help command; Woadkeeper will own shared help.
 
     # CoreOps: prefer cogs/ops.py, fallback to claims/middleware/ops.py
     loaded_ops = await _load("cogs.ops")
     if not loaded_ops:
         await _load("claims.middleware.ops")
 
-    # 🔹 Add the Shards & Mercy module
-    await _load("cogs.shards")
+    # Shards/Mercy and OCR commands are no longer part of Achievements command surface.
 
 # ---------------- helpers ----------------
 def _is_image(att: discord.Attachment) -> bool:
@@ -1359,46 +1357,25 @@ async def process_claim(itx: discord.Interaction, ach_key: str,
         await _one(att)
 
 # ---------------- staff guard ----------------
+def _is_admin(member: discord.Member) -> bool:
+    """Return True for members with server-level admin privileges.
+
+    Achievements admin-only commands use Discord guild permissions and fail
+    closed when permission data is unavailable. Guardian Knight/staff roles do
+    not satisfy this check on their own.
+    """
+    perms = getattr(member, "guild_permissions", None)
+    return bool(perms and (getattr(perms, "administrator", False) or getattr(perms, "manage_guild", False)))
+
+
 def _is_staff(member: discord.Member) -> bool:
-    if member.guild_permissions.manage_guild:
+    if _is_admin(member):
         return True
     rid = CFG.get("guardian_knights_role_id")
     return bool(rid and any(r.id == rid for r in member.roles))
 
-# ---------------- help ----------------
-@help_metadata(function_group="claims", section="claims", access_tier="user", usage="!help [topic]", flags=("local_help", "transitional"))
-@tier("user")
-@bot.command(name="help")
-async def help_cmd(ctx: commands.Context, *, topic: str = None):
-    topic = (topic or "").strip().lower()
-
-    # show overview if no topic given
-    if not topic:
-        return await ctx.reply(embed=_mk_help_embed_claims(ctx.guild), mention_author=False)
-
-    pages = {
-        "testconfig":     "`!testconfig`\nShow current configuration: targets, role ids, source & row counts.",
-        "configstatus":   "`!configstatus`\nShort one-line status: source, loaded time, counts.",
-        "reloadconfig":   "`!reloadconfig`\nReload configuration from Google Sheets or Excel.",
-        "listach":        "`!listach [filter]`\nList loaded achievement keys (optionally filtered).",
-        "findach":        "`!findach <text>`\nSearch achievements by key/name/category/text.",
-        "testach":        "`!testach <key> [where]`\nPreview a single achievement embed (optionally to another channel).",
-        "testlevel":      "`!testlevel [query] [where]`\nPreview a level-up embed (optionally to another channel).",
-        "flushpraise":    "`!flushpraise`\nForce-post any buffered praise in this server.",
-        "ping":           "`!ping`\nSimple liveness check.",
-        "claim":          "Post your screenshot **in the configured claims thread**. I’ll guide you via buttons.",
-        "claims":         "Same as `!help claim`.",
-        "gk":             "Guardian Knights review claims that need verification. They can approve/deny or grant a different role.",
-    }
-
-    txt = pages.get(topic)
-    if not txt:
-        logging.getLogger("c1c-claims").warning("Unknown help topic requested: %s", topic)
-        return
-
-    e = discord.Embed(title=f"!help {topic}", description=txt, color=HELP_COLOR)
-    e.set_footer(text=CFG.get("embed_footer_text", "C1C Achievements") or "C1C Achievements")
-    await ctx.reply(embed=e, mention_author=False)
+# ---------------- local help removed ----------------
+# Achievements intentionally does not register !help in this phase.
 
 # ---------------- admin/test commands ----------------
 
@@ -1422,12 +1399,12 @@ async def helpseed(ctx: commands.Context):
         return await ctx.send("Help registry seed failed. Check logs for details.")
     await ctx.send(format_seed_reply(result))
 
-@help_metadata(function_group="operational", section="admin_maintenance", access_tier="staff", usage="!testconfig", flags=("diagnostic",))
-@tier("staff")
+@help_metadata(function_group="operational", section="admin_maintenance", access_tier="admin", usage="!testconfig", flags=("diagnostic",))
+@tier("admin")
 @bot.command(name="testconfig")
 async def testconfig(cmdx: commands.Context):
-    if not _is_staff(cmdx.author):
-        return await cmdx.send("Staff only.")
+    if not _is_admin(cmdx.author):
+        return await cmdx.send("Admin only.")
 
     thread_txt = await _fmt_chan_or_thread(cmdx.guild, CFG.get("public_claim_thread_id"))
     levels_txt = await _fmt_chan_or_thread(cmdx.guild, CFG.get("levels_channel_id"))
@@ -1452,21 +1429,21 @@ async def testconfig(cmdx: commands.Context):
     )
     await safe_send_embed(cmdx, emb)
 
-@help_metadata(function_group="operational", section="admin_maintenance", access_tier="staff", usage="!configstatus", flags=("diagnostic",))
-@tier("staff")
+@help_metadata(function_group="operational", section="admin_maintenance", access_tier="admin", usage="!configstatus", flags=("diagnostic",))
+@tier("admin")
 @bot.command(name="configstatus")
 async def configstatus(ctx: commands.Context):
-    if not _is_staff(ctx.author):
-        return await ctx.send("Staff only.")
+    if not _is_admin(ctx.author):
+        return await ctx.send("Admin only.")
     loaded_at = CONFIG_META["loaded_at"].strftime("%Y-%m-%d %H:%M:%S UTC") if CONFIG_META["loaded_at"] else "—"
     await ctx.send(f"Source: **{CONFIG_META['source']}** | Loaded: **{loaded_at}** | Ach={len(ACHIEVEMENTS)} Cat={len(CATEGORIES)} Lvls={len(LEVELS)}")
 
-@help_metadata(function_group="operational", section="admin_maintenance", access_tier="staff", usage="!reloadconfig")
-@tier("staff")
+@help_metadata(function_group="operational", section="admin_maintenance", access_tier="admin", usage="!reloadconfig")
+@tier("admin")
 @bot.command(name="reloadconfig")
 async def reloadconfig(ctx: commands.Context):
-    if not _is_staff(ctx.author):
-        return await ctx.send("Staff only.")
+    if not _is_admin(ctx.author):
+        return await ctx.send("Admin only.")
     try:
         load_config()
         loaded_at = CONFIG_META["loaded_at"].strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -1474,12 +1451,12 @@ async def reloadconfig(ctx: commands.Context):
     except Exception as e:
         await ctx.send(f"Reload failed: `{e}`")
 
-@help_metadata(function_group="achievements", section="admin_maintenance", access_tier="staff", usage="!listach [filter]")
-@tier("staff")
+@help_metadata(function_group="achievements", section="admin_maintenance", access_tier="admin", usage="!listach [filter]")
+@tier("admin")
 @bot.command(name="listach")
 async def listach(ctx: commands.Context, filter_text: str = ""):
-    if not _is_staff(ctx.author):
-        return await ctx.send("Staff only.")
+    if not _is_admin(ctx.author):
+        return await ctx.send("Admin only.")
     keys = sorted(ACHIEVEMENTS.keys())
     if filter_text:
         f = filter_text.lower()
@@ -1489,12 +1466,12 @@ async def listach(ctx: commands.Context, filter_text: str = ""):
     chunk = ", ".join(keys[:60])
     await ctx.send(f"**Loaded achievements ({len(keys)}):** {chunk}{' …' if len(keys) > 60 else ''}")
 
-@help_metadata(function_group="achievements", section="admin_maintenance", access_tier="staff", usage="!findach <text>")
-@tier("staff")
+@help_metadata(function_group="achievements", section="admin_maintenance", access_tier="admin", usage="!findach <text>")
+@tier("admin")
 @bot.command(name="findach")
 async def findach(ctx: commands.Context, *, text: str):
-    if not _is_staff(ctx.author):
-        return await ctx.send("Staff only.")
+    if not _is_admin(ctx.author):
+        return await ctx.send("Admin only.")
     t = text.lower()
     hits = []
     for k, r in ACHIEVEMENTS.items():
@@ -1505,12 +1482,12 @@ async def findach(ctx: commands.Context, *, text: str):
         return await ctx.send("No matches.")
     await ctx.send("\n".join(hits[:20]))
 
-@help_metadata(function_group="achievements", section="testing", access_tier="staff", usage="!testach <key> [where]", flags=("test",))
-@tier("staff")
+@help_metadata(function_group="achievements", section="testing", access_tier="admin", usage="!testach <key> [where]", flags=("test",))
+@tier("admin")
 @bot.command(name="testach")
 async def testach(ctx: commands.Context, key: str, where: Optional[str] = None):
-    if not _is_staff(ctx.author):
-        return await ctx.send("Staff only.")
+    if not _is_admin(ctx.author):
+        return await ctx.send("Admin only.")
     ach = ACHIEVEMENTS.get(key)
     if not ach:
         close = [k for k in ACHIEVEMENTS.keys() if key.lower() in k.lower()]
@@ -1523,12 +1500,12 @@ async def testach(ctx: commands.Context, key: str, where: Optional[str] = None):
     if target.id != ctx.channel.id:
         await ctx.reply(f"Preview sent to {target.mention}", mention_author=False)
 
-@help_metadata(function_group="achievements", section="testing", access_tier="staff", usage="!testlevel [query] [where]", flags=("test",))
-@tier("staff")
+@help_metadata(function_group="achievements", section="testing", access_tier="admin", usage="!testlevel [query] [where]", flags=("test",))
+@tier("admin")
 @bot.command(name="testlevel")
 async def testlevel(ctx: commands.Context, *, args: str = ""):
-    if not _is_staff(ctx.author):
-        return await ctx.send("Staff only.")
+    if not _is_admin(ctx.author):
+        return await ctx.send("Admin only.")
     parts = args.rsplit(" ", 1) if args else []
     query = parts[0] if parts else ""
     where = parts[1] if len(parts) == 2 else None
@@ -1548,12 +1525,12 @@ async def testlevel(ctx: commands.Context, *, args: str = ""):
     if target.id != ctx.channel.id:
         await ctx.reply(f"Preview sent to {target.mention}", mention_author=False)
 
-@help_metadata(function_group="claims", section="admin_maintenance", access_tier="staff", usage="!flushpraise")
-@tier("staff")
+@help_metadata(function_group="claims", section="admin_maintenance", access_tier="admin", usage="!flushpraise")
+@tier("admin")
 @bot.command(name="flushpraise")
 async def flushpraise(ctx: commands.Context):
-    if not _is_staff(ctx.author):
-        return await ctx.send("Staff only.")
+    if not _is_admin(ctx.author):
+        return await ctx.send("Admin only.")
     g = GROUP.get(ctx.guild.id, {})
     if not g:
         return await ctx.send("Nothing to flush.")
@@ -1561,10 +1538,30 @@ async def flushpraise(ctx: commands.Context):
         await _flush_group(ctx.guild, uid)
     await ctx.send("Flushed pending praise for this server.")
 
-@help_metadata(function_group="operational", section="members", access_tier="user", usage="!ping")
-@tier("user")
-@bot.command(name="ping")
+
+def _document_command(name: str, brief: str, help_text: str) -> None:
+    command = bot.get_command(name)
+    if command is not None:
+        command.brief = brief
+        command.help = help_text
+
+
+_document_command("helpseed", "Seeds Achievements command metadata into HelpCommands.", "Hidden staff maintenance command that reads the Achievements Config tab to locate the shared HelpCommands workbook and upserts exported Achievements commands. It reports created, updated, skipped, and manual-review counts in the channel and does not export itself.")
+_document_command("testconfig", "Shows full Achievements config details.", "Admin check that replies with an embed showing configured claims, levels, audit, and Guardian Knights targets plus the current config source, load time, and loaded row counts. Use it after config changes to verify the bot is pointing at the expected Discord objects and data source.")
+_document_command("configstatus", "Shows a short Achievements config load status.", "Admin check that posts a compact in-channel status line with the current config source, last load time, and loaded achievement, category, and level counts. Use it for a quick confirmation that Achievements has loaded the expected data.")
+_document_command("reloadconfig", "Reloads Achievements config from the configured source.", "Admin operation that reloads Achievements configuration and achievement rows from the configured Google Sheet or local Excel source, then posts the source, reload time, and row counts. Use it after updating config or achievement definitions.")
+_document_command("listach", "Lists loaded achievement keys.", "Admin lookup command that lists the currently loaded achievement keys, optionally filtered by key or display name. It replies in-channel with up to the first 60 matches so admins can confirm available keys before testing or troubleshooting.")
+_document_command("findach", "Searches loaded achievements.", "Admin lookup command that searches loaded achievement keys, display names, categories, titles, and body text for the provided search term. It replies in-channel with matching keys and names to help find the exact key for previewing or troubleshooting.")
+_document_command("testach", "Previews an achievement embed.", "Admin testing command that builds the achievement unlock embed for a specific achievement key. Optionally accepts a target location argument supported by the channel resolver; it posts the preview there and confirms when sent outside the invoking channel.")
+_document_command("testlevel", "Previews a level-up embed.", "Admin testing command that builds a level-up preview embed using an optional search query and optional target location. It uses the first matching loaded level row, or the first level row when no query is supplied, and posts a preview for embed verification.")
+_document_command("flushpraise", "Posts queued praise messages.", "Admin operation that forces any buffered praise messages for the current server to post immediately instead of waiting for normal batching. It replies in-channel when there is nothing queued or after the pending praise has been flushed.")
+
+@help_metadata(function_group="operational", section="members", access_tier="staff", usage="!ping")
+@tier("staff")
+@bot.command(name="ping", brief="Checks whether Achievements is responsive.", help="Staff liveness check that reacts to the invoking message with 🏓 when the bot can process commands. Use it to confirm the Achievements bot is online without changing configuration or posting an embed.")
 async def ping(ctx: commands.Context):
+    if not _is_staff(ctx.author):
+        return await ctx.send("Staff only.")
     # react-only liveness check
     try:
         await ctx.message.add_reaction("🏓")

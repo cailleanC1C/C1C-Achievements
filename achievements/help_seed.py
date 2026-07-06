@@ -254,7 +254,7 @@ def seed_help_commands(bot: commands.Bot, worksheet) -> SeedResult:
             if row_map["access_level"]:
                 new[col["access_level"]] = row_map["access_level"]
             for h in ("category", "summary", "details"):
-                if not new[col[h]]:
+                if not str(new[col[h]] or "").strip():
                     new[col[h]] = row_map[h]
             updates.append({"range": f"A{rownum}:{_a1(rownum, len(headers))}", "values": [new]})
             result.updated += 1

@@ -135,21 +135,47 @@ def test_access_levels_allowed_and_invalid_blanks():
     assert row["access_level"] == ""
     assert "access_level" in manual
 
-def test_existing_rows_update_without_overwriting_manual_fields():
-    b = bot_with(cmd("ping", usage="!ping"))
-    ws = WS([HEADERS, ["TRUE","achievements","ping","old","old usage","manual cat","staff","manual summary","manual details","note","7"]])
+def test_existing_rows_update_bot_owned_fields_without_overwriting_manual_fields():
+    b = bot_with(cmd("ping", access="admin", usage="!ping --new", section="generated cat"))
+    ws = WS([HEADERS, ["TRUE","achievements","ping","old command","old usage","manual cat","staff","manual summary","manual details","note","7"]])
     result = seed_help_commands(b, ws)
     assert result.updated == 1 and result.created == 0
     updated = ws.batch_calls[0][0][0]["values"][0]
+
+    # Manually curated fields are preserved on existing rows.
     assert updated[0] == "TRUE"
-    assert updated[3] == "!ping"
-    assert updated[4] == "!ping"
     assert updated[5] == "manual cat"
-    assert updated[6] == "user"
     assert updated[7] == "manual summary"
     assert updated[8] == "manual details"
     assert updated[9] == "note"
     assert updated[10] == "7"
+
+    # Bot-owned fields still refresh from command metadata.
+    assert updated[1] == "achievements"
+    assert updated[2] == "ping"
+    assert updated[3] == "!ping"
+    assert updated[4] == "!ping --new"
+    assert updated[6] == "admin"
+
+
+def test_existing_blank_category_summary_and_details_are_filled_from_metadata():
+    b = bot_with(cmd("ping", access="staff", usage="!ping", section="members"))
+    ws = WS([HEADERS, ["TRUE","achievements","ping","old command","old usage","   ","user",""," 	 ","note","7"]])
+    result = seed_help_commands(b, ws)
+    assert result.updated == 1 and result.created == 0
+    updated = ws.batch_calls[0][0][0]["values"][0]
+
+    assert updated[5] == "members"
+    assert updated[7] == "ping brief"
+    assert updated[8] == "ping help"
+    assert updated[0] == "TRUE"
+    assert updated[9] == "note"
+    assert updated[10] == "7"
+    assert updated[1] == "achievements"
+    assert updated[2] == "ping"
+    assert updated[3] == "!ping"
+    assert updated[4] == "!ping"
+    assert updated[6] == "staff"
 
 def test_new_rows_created_with_false_bot_key_and_blank_sort_order():
     b = bot_with(cmd("ping"))
@@ -219,8 +245,7 @@ def test_seed_command_staff_guard_and_help_behavior_unchanged():
     assert seed is not None
     assert seed.extras["tier"] == "hidden"
     assert "_is_staff" in seed.callback.__code__.co_names
-    assert app.bot.get_command("help") is not None
-    assert app.bot.get_command("help").extras["help_flags"] == ("local_help", "transitional")
+    assert app.bot.get_command("help") is None
 
 def test_reply_format_includes_manual_counts_and_local_help_only():
     r = seed_help_commands(bot_with(cmd("ping")), WS([HEADERS]))
