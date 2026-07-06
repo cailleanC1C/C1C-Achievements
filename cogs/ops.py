@@ -31,21 +31,10 @@ SCOPED_PREFIX_SET = {p.lower() for p in SCOPED_PREFIXES}
 
 
 def _coreops_guard(ctx: commands.Context) -> tuple[bool, str]:
-    """
-    Returns (allowed, msg).
-      - If staff: (True, "")
-      - If non-staff using a scoped prefix (e.g. !sc): (False, "Staff only.")
-      - If non-staff without a scoped prefix: (False, picker_text)
-    """
-    if app._is_staff(ctx.author):
+    """Return (allowed, msg) for admin-only CoreOps commands."""
+    if app._is_admin(ctx.author):
         return True, ""
-
-    prefix = (ctx.prefix or "").strip().lower()
-    if prefix in SCOPED_PREFIX_SET:
-        return False, "Staff only."
-
-    cmd_name = ctx.command.name if ctx.command else "this command"
-    return False, format_prefix_picker(cmd_name)
+    return False, "Admin only."
 
 
 class OpsCog(commands.Cog):
@@ -56,9 +45,9 @@ class OpsCog(commands.Cog):
         except Exception:
             pass
 
-    # ---------------- core ops commands (staff-only; non-staff get prefix picker) ----------------
-    @help_metadata(function_group="operational", section="admin_maintenance", access_tier="staff", usage="!health", flags=('diagnostic',))
-    @tier("staff")
+    # ---------------- core ops commands (admin-only) ----------------
+    @help_metadata(function_group="operational", section="admin_maintenance", access_tier="admin", usage="!health", flags=('diagnostic',))
+    @tier("admin")
     @commands.command(name="health")
     async def health_cmd(self, ctx: commands.Context):
         ok, msg = _coreops_guard(ctx)
@@ -110,8 +99,8 @@ class OpsCog(commands.Cog):
         emb = build_health_embed(app.BOT_VERSION, summary)
         await app.safe_send_embed(ctx, emb)
 
-    @help_metadata(function_group="operational", section="admin_maintenance", access_tier="staff", usage="!digest", flags=('diagnostic',))
-    @tier("staff")
+    @help_metadata(function_group="operational", section="admin_maintenance", access_tier="admin", usage="!digest", flags=('diagnostic',))
+    @tier("admin")
     @commands.command(name="digest")
     async def digest_cmd(self, ctx: commands.Context):
         ok, msg = _coreops_guard(ctx)
@@ -167,8 +156,8 @@ class OpsCog(commands.Cog):
         line = build_digest_line(summary)
         await ctx.send(line)
 
-    @help_metadata(function_group="operational", section="admin_maintenance", access_tier="staff", usage="!reload")
-    @tier("staff")
+    @help_metadata(function_group="operational", section="admin_maintenance", access_tier="admin", usage="!reload")
+    @tier("admin")
     @commands.command(name="reload")
     async def reload_cmd(self, ctx: commands.Context):
         ok, msg = _coreops_guard(ctx)
@@ -193,8 +182,8 @@ class OpsCog(commands.Cog):
         except Exception as e:
             await ctx.send(f"Reload failed: `{e}`")
 
-    @help_metadata(function_group="operational", section="admin_maintenance", access_tier="staff", usage="!checksheet", flags=('diagnostic',))
-    @tier("staff")
+    @help_metadata(function_group="operational", section="admin_maintenance", access_tier="admin", usage="!checksheet", flags=('diagnostic',))
+    @tier("admin")
     @commands.command(name="checksheet")
     async def checksheet_cmd(self, ctx: commands.Context):
         ok, msg = _coreops_guard(ctx)
@@ -245,8 +234,8 @@ class OpsCog(commands.Cog):
         emb = build_checksheet_embed(app.BOT_VERSION, backend, items)
         await app.safe_send_embed(ctx, emb)
 
-    @help_metadata(function_group="operational", section="admin_maintenance", access_tier="staff", usage="!env", flags=('diagnostic',))
-    @tier("staff")
+    @help_metadata(function_group="operational", section="admin_maintenance", access_tier="admin", usage="!env", flags=('diagnostic',))
+    @tier("admin")
     @commands.command(name="env")
     async def env_cmd(self, ctx: commands.Context):
         ok, msg = _coreops_guard(ctx)
@@ -266,8 +255,8 @@ class OpsCog(commands.Cog):
         emb = build_env_embed(app.BOT_VERSION, env_info)
         await app.safe_send_embed(ctx, emb)
 
-    @help_metadata(function_group="operational", section="admin_maintenance", access_tier="staff", usage="!build", flags=('diagnostic', 'hidden'))
-    @tier("staff")
+    @help_metadata(function_group="operational", section="admin_maintenance", access_tier="admin", usage="!build", flags=('diagnostic', 'hidden'))
+    @tier("admin")
     @commands.command(name="build")
     async def build_cmd(self, ctx: commands.Context):
         ok, msg = _coreops_guard(ctx)
@@ -322,8 +311,8 @@ class OpsCog(commands.Cog):
 
         await ctx.reply("\n".join(lines), mention_author=False)
 
-    @help_metadata(function_group="operational", section="admin_maintenance", access_tier="staff", usage="!reboot")
-    @tier("staff")
+    @help_metadata(function_group="operational", section="admin_maintenance", access_tier="admin", usage="!reboot")
+    @tier("admin")
     @commands.command(name="reboot", aliases=["restart", "rb"])
     async def reboot_cmd(self, ctx: commands.Context):
         ok, msg = _coreops_guard(ctx)
@@ -368,6 +357,20 @@ class OpsCog(commands.Cog):
                 await app.safe_send_embed(ctx, done)
         except Exception as e:
             await ctx.send(f"Reboot failed: `{e}`")
+
+
+def _document_ops_command(command: commands.Command, brief: str, help_text: str) -> None:
+    command.brief = brief
+    command.help = help_text
+
+
+_document_ops_command(OpsCog.health_cmd, "Shows Achievements runtime health.", "Admin diagnostic that replies with an embed summarizing bot uptime, gateway readiness, latency, last event age, config status, loaded row counts, and configured Discord targets. Use it to troubleshoot whether Achievements is connected and reading expected data.")
+_document_ops_command(OpsCog.digest_cmd, "Posts a compact Achievements health digest.", "Admin diagnostic that replies with a one-line status digest covering runtime, gateway, config, row counts, and target availability. Use it when you need a concise operational snapshot without the full health embed.")
+_document_ops_command(OpsCog.reload_cmd, "Reloads Achievements config and reports counts.", "Admin operation that reacts to the invoking message, reloads Achievements configuration from the configured source, and replies with an embed showing source, reload time, and loaded row counts. Use it after changing Achievements data or config.")
+_document_ops_command(OpsCog.checksheet_cmd, "Checks loaded Achievements sheet sections.", "Admin diagnostic that replies with an embed showing the configured backend and row/header status for General, Achievements, Categories, Levels, and Reasons data. Use it to confirm required sheet sections are populated and readable.")
+_document_ops_command(OpsCog.env_cmd, "Shows safe Achievements environment status.", "Admin diagnostic that replies with an embed showing whether key runtime environment variables are set, along with auto-refresh and watchdog settings. It avoids printing secret values and is useful for deployment troubleshooting.")
+_document_ops_command(OpsCog.build_cmd, "Shows Achievements build/runtime fingerprint.", "Admin diagnostic that replies with Python version, configured git SHA, and selected local file fingerprints used for runtime troubleshooting. Use it to confirm which code build is running in the deployed Achievements process.")
+_document_ops_command(OpsCog.reboot_cmd, "Performs a soft Achievements reboot.", "Admin operation that acknowledges with a rebooting message, reloads Achievements config, and edits or posts a ready embed with current source and row counts. Aliases !restart and !rb invoke the same soft reload behavior.")
 
 
 async def setup(bot: commands.Bot):
