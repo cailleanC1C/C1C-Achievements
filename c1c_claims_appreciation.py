@@ -547,6 +547,70 @@ def _category_by_key(cat_key: str) -> Optional[dict]:
     return None
 
 EMOJI_TAG_RE = re.compile(r"^<a?:\w+:\d+>$")
+CUSTOM_EMOJI_ID_RE = re.compile(r"^<a?:\w+:(\d+)>$")
+
+
+def _emoji_asset_url(emoji) -> Optional[str]:
+    try:
+        url = getattr(emoji, "url", None)
+        return str(url) if url else None
+    except Exception:
+        return None
+
+
+def _find_custom_emoji(emoji_id: int, *, bot=None, guild=None):
+    if bot is not None:
+        try:
+            emoji = bot.get_emoji(emoji_id)
+            if emoji is not None:
+                return emoji
+        except Exception:
+            pass
+    if guild is not None:
+        try:
+            return discord.utils.get(getattr(guild, "emojis", []) or [], id=emoji_id)
+        except Exception:
+            return None
+    return None
+
+
+def resolve_praise_thumbnail_url(role: discord.Role, emoji_name_or_id: Optional[str], bot=None, guild: discord.Guild | None = None) -> Optional[str]:
+    """Resolve the praise thumbnail without blocking praise creation on bad emoji config.
+
+    Role icons keep priority. EmojiNameOrId is only used as a custom-emoji fallback
+    when no role icon/display icon is available.
+    """
+    role_icon = _big_role_icon_url(role)
+    if role_icon:
+        return role_icon
+
+    value = _to_str(emoji_name_or_id).strip()
+    if not value:
+        return None
+
+    emoji_id: int | None = None
+    mention = CUSTOM_EMOJI_ID_RE.match(value)
+    if mention:
+        try:
+            emoji_id = int(mention.group(1))
+        except Exception:
+            emoji_id = None
+    elif value.isdigit():
+        try:
+            emoji_id = int(value)
+        except Exception:
+            emoji_id = None
+
+    try:
+        if emoji_id is not None:
+            return _emoji_asset_url(_find_custom_emoji(emoji_id, bot=bot, guild=guild))
+
+        if guild is not None:
+            emoji = discord.utils.get(getattr(guild, "emojis", []) or [], name=value)
+            return _emoji_asset_url(emoji)
+    except Exception:
+        return None
+    return None
 
 def resolve_emoji_text(guild: discord.Guild, value: Optional[str], fallback: Optional[str]=None) -> str:
     v = _to_str(value).strip()
@@ -672,9 +736,11 @@ def build_achievement_embed(guild: discord.Guild, user: discord.Member, role: di
         if ficon: emb.set_footer(text=footer_text, icon_url=ficon)
         else:     emb.set_footer(text=footer_text)
 
-    hero = resolve_hero_image(guild, role, ach_row)
-    if hero:
-        emb.set_thumbnail(url=hero)  # top-right
+    thumb = resolve_hero_image(guild, role, ach_row) or resolve_praise_thumbnail_url(
+        role, ach_row.get("EmojiNameOrId"), guild=guild
+    )
+    if thumb:
+        emb.set_thumbnail(url=thumb)  # top-right
     return emb
 
 def build_group_embed(guild: discord.Guild, user: discord.Member, items: List[Tuple[discord.Role, dict]]) -> discord.Embed:
@@ -695,9 +761,11 @@ def build_group_embed(guild: discord.Guild, user: discord.Member, items: List[Tu
         lines.append(f"• {body}")
     emb.description = "\n".join(lines)
 
-    hero = resolve_hero_image(guild, r0, a0)
-    if hero:
-        emb.set_thumbnail(url=hero)  # top-right
+    thumb = resolve_hero_image(guild, r0, a0) or resolve_praise_thumbnail_url(
+        r0, a0.get("EmojiNameOrId"), guild=guild
+    )
+    if thumb:
+        emb.set_thumbnail(url=thumb)  # top-right
     footer_text = CFG.get("embed_footer_text")
     if footer_text:
         ficon = _safe_icon(CFG.get("embed_footer_icon"))
