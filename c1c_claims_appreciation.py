@@ -253,14 +253,13 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.guilds = True
-bot = commands.Bot(command_prefix=get_prefix, intents=intents, strip_after_prefix=True)
+bot = commands.Bot(
+    command_prefix=get_prefix,
+    intents=intents,
+    strip_after_prefix=True,
+    help_command=None,
+)
 # Ensure prefixes like "!sc" accept a space-separated command (e.g., "!sc health").
-
-# disable default help so we can own !help behavior
-try:
-    bot.remove_command("help")
-except Exception:
-    pass
 
 # ---------------- runtime config ----------------
 CFG = {
@@ -1635,47 +1634,6 @@ async def ping(ctx: commands.Context):
         await ctx.message.add_reaction("🏓")
     except Exception:
         pass
-
-# ---------------- help (overview + subtopics, silent on unknown) ----------------
-HELP_COLOR = discord.Color.blurple()
-
-def _mk_help_embed_claims(guild: discord.Guild | None = None) -> discord.Embed:
-    e = discord.Embed(
-        title="🏆 C1C Appreciation & Claims — Help",
-        color=HELP_COLOR,
-        description=(
-            "Post your screenshot **in the public claims thread** to start a claim. "
-            "I’ll prompt you to pick a category and achievement; some claims auto-grant, "
-            "others summon **Guardian Knights** for review.\n\n"
-            "**Staff** can use the commands below for config and testing."
-        )
-    )
-    e.add_field(
-        name="How to claim (players)",
-        value=(
-            "1) Post a screenshot in the configured claims thread.\n"
-            "2) Use the buttons to choose category ➜ achievement.\n"
-            "3) If review is needed, GK will approve/deny or grant a different role."
-        ),
-        inline=False
-    )
-    e.add_field(
-        name="Staff commands",
-        value=(
-            "• `!testconfig` — show current config & sources\n"
-            "• `!configstatus` — short config summary\n"
-            "• `!reloadconfig` — reload Sheets/Excel config\n"
-            "• `!listach [filter]` — list loaded achievements\n"
-            "• `!findach <text>` — search achievements\n"
-            "• `!testach <key> [where]` — preview an achievement embed\n"
-            "• `!testlevel [query] [where]` — preview a level-up embed (optionally to another channel)\n"
-            "• `!flushpraise` — force-post any buffered praise\n"
-            "• `!ping` — bot alive check"
-        ),
-        inline=False
-    )
-    e.set_footer(text=CFG.get("embed_footer_text", "C1C Achievements") or "C1C Achievements")
-    return e
 
 # ---------------- error reporter ----------------
 @bot.event
