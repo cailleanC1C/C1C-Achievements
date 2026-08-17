@@ -18,6 +18,10 @@ except ModuleNotFoundError as exc:
 else:
     install_gspread_broker()
 
+    from achievements.sheets_telemetry import start_sheets_telemetry
+
+    start_sheets_telemetry()
+
     def sheets_broker_snapshot() -> dict:
         return {"available": True, **_sheets_broker_snapshot()}
 
