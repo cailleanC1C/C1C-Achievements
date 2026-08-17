@@ -1,9 +1,10 @@
 """Process-wide Google Sheets quota broker for C1C-Achievements.
 
-Achievements has two synchronous gspread consumers: the main configuration
-loader and the HelpCommands seed/export path.  Installing the broker at the
-shared gspread boundary lets both consumers share one process-wide quota,
-cache, single-flight and 429 policy without duplicating retry logic.
+Achievements has two synchronous gspread consumers: the normal read-only config
+loader and the read/write HelpCommands seed path.  This module installs one
+process-wide quota and value-cache boundary while keeping cached gspread handles
+scoped to the client that created them, so credential scopes never bleed across
+those two paths.
 """
 
 from __future__ import annotations
@@ -51,7 +52,7 @@ class _Flight:
 
 
 class QuotaCooldownError(RuntimeError):
-    """Raised without a physical call while a recently exhausted quota cools."""
+    """Raised without a physical call while an exhausted quota cools."""
 
     def __init__(self, retry_after_seconds: float) -> None:
         self.retry_after_seconds = max(0.0, float(retry_after_seconds))
@@ -109,6 +110,10 @@ def _sheet_id(spreadsheet: Any) -> str:
     )
 
 
+def _client_identity(client: Any) -> int:
+    return id(client)
+
+
 def _worksheet_identity(worksheet: Any) -> tuple[str, str]:
     spreadsheet_id = str(
         getattr(worksheet, "spreadsheet_id", "")
@@ -130,7 +135,7 @@ def _worksheet_policy(worksheet: Any) -> CachePolicy:
 
 
 class SheetsReadBroker:
-    """Synchronous quota broker with cache, coalescing and global cooldown."""
+    """Synchronous quota broker with caching, coalescing and cooldown."""
 
     def __init__(
         self,
@@ -147,18 +152,16 @@ class SheetsReadBroker:
         self.retry_attempts = max(1, int(retry_attempts))
         self.retry_base_seconds = max(0.0, float(retry_base_seconds))
         self.retry_cap_seconds = max(self.retry_base_seconds, float(retry_cap_seconds))
-        self.exhausted_cooldown_seconds = max(
-            0.0, float(exhausted_cooldown_seconds)
-        )
+        self.exhausted_cooldown_seconds = max(0.0, float(exhausted_cooldown_seconds))
 
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
         self._cache: dict[Hashable, _CacheEntry] = {}
         self._inflight: dict[Hashable, _Flight] = {}
 
-        # Small token bucket: a quiet process may use its six-read allocation as
-        # a short burst, which keeps the synchronous startup loader responsive.
-        # Sustained refill remains SHEETS_READ_BUDGET_RPM / minute.
+        # A quiet process may consume its small allocation as a startup burst;
+        # sustained refill remains SHEETS_READ_BUDGET_RPM per minute.  This
+        # avoids adding minute-long sleeps inside the synchronous Discord path.
         self._capacity = float(self.rpm)
         self._tokens = float(self.rpm)
         self._last_refill = time.monotonic()
@@ -324,10 +327,7 @@ class SheetsReadBroker:
             raise
         else:
             with self._lock:
-                self._cache[key] = _CacheEntry(
-                    value=value,
-                    loaded_at=time.monotonic(),
-                )
+                self._cache[key] = _CacheEntry(value=value, loaded_at=time.monotonic())
                 flight.event.set()
                 self._inflight.pop(key, None)
             return value
@@ -401,9 +401,10 @@ _INSTALL_LOCK = threading.Lock()
 
 def _workbook_worksheets(spreadsheet: Spreadsheet) -> list[Worksheet]:
     spreadsheet_id = _sheet_id(spreadsheet)
+    client_id = _client_identity(getattr(spreadsheet, "client", None))
     original = _ORIGINALS["Spreadsheet.worksheets"]
     rows = broker.read(
-        ("worksheets", spreadsheet_id),
+        ("worksheets", spreadsheet_id, client_id),
         lambda: original(spreadsheet),
         policy=HANDLE_POLICY,
         component="gspread",
@@ -446,8 +447,11 @@ def install_gspread_broker() -> None:
         original_get = Worksheet.get
 
         def open_by_key(self: Client, key: str, *args: Any, **kwargs: Any) -> Spreadsheet:
+            # Handles retain their HTTP client and therefore its OAuth scopes.
+            # Keep handle reuse client-scoped even though value data below is
+            # safely shared across clients for the same workbook/tab.
             return broker.read(
-                ("workbook", str(key)),
+                ("workbook", str(key), _client_identity(self)),
                 lambda: original_open_by_key(self, key, *args, **kwargs),
                 policy=HANDLE_POLICY,
                 component="gspread",
@@ -472,6 +476,7 @@ def install_gspread_broker() -> None:
 
         def get(self: Worksheet, *args: Any, **kwargs: Any) -> Any:
             spreadsheet_id, worksheet_id = _worksheet_identity(self)
+            policy = _worksheet_policy(self)
             result = broker.read(
                 (
                     "values",
@@ -481,8 +486,8 @@ def install_gspread_broker() -> None:
                     _freeze(kwargs),
                 ),
                 lambda: original_get(self, *args, **kwargs),
-                policy=_worksheet_policy(self),
-                component="config" if _worksheet_policy(self) is CONFIG_DATA else "help_seed",
+                policy=policy,
+                component="config" if policy is CONFIG_DATA else "help_seed",
                 reason=f"values:{getattr(self, 'title', '')}",
             )
             try:
