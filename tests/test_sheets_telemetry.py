@@ -1,4 +1,42 @@
+from __future__ import annotations
+
+import subprocess
+import sys
+
 from achievements.sheets_telemetry import interval_metrics
+
+
+def test_achievements_package_import_does_not_start_telemetry_thread():
+    """Regression for the Reminder import-order failure class.
+
+    Importing the helper package may install the broker boundary, but it must not
+    start the background telemetry reporter.  The reporter is armed lazily and
+    starts only when Google Sheets is actually used.
+    """
+
+    code = (
+        "import threading; import achievements; "
+        "print(any(t.name == 'sheets-broker-telemetry' for t in threading.enumerate()))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout.strip() == "False"
+
+
+def test_package_source_orders_broker_before_lazy_telemetry_start():
+    import achievements
+    from gspread.client import Client
+
+    # The broker marker must survive the lazy telemetry wrapper or a later
+    # installer call could double-wrap gspread.
+    assert getattr(Client.open_by_key, "__c1c_sheets_brokered__", False)
+    assert getattr(Client.open_by_key, "__c1c_sheets_telemetry_hook__", False)
+    assert achievements.sheets_broker_snapshot()["available"] is True
 
 
 def test_interval_metrics_reports_deltas_and_avoided_share():
